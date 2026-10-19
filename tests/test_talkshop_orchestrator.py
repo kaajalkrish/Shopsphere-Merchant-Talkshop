@@ -15,6 +15,7 @@ from backend.db.schema import Order, PaymentMethod
 from backend.main import app
 from backend.talkshop import brain
 from backend.talkshop.state import ALLOWED, Stage
+from tests.conftest import add_card
 
 REAL_DECIDE = brain.decide          # kept before the autouse fake replaces it
 REAL_RECOMMEND = brain.recommend
@@ -36,7 +37,7 @@ def auth_headers(member_headers):
 @pytest.fixture
 def shopper(client, auth_headers):
     client.post("/api/me/addresses", json=HOME, headers=auth_headers)
-    client.post("/api/me/payment-methods", json=VISA, headers=auth_headers)
+    add_card(client, auth_headers, VISA)
     return auth_headers
 
 
@@ -131,14 +132,14 @@ def test_spec_conversation_end_to_end(client, shopper):
     ev = turn(client, shopper, sid, text="Yes.")
     co = of(ev, "checkout_ready")[0]["checkout"]
     # Part 2: member pricing (15% running-shoe offer before tax)
-    assert (co["subtotal"], co["tax"], co["total"]) == (129.0, 9.05, 118.7)
+    assert (co["subtotal"], co["tax"], co["total"]) == (129.0, 10.64, 139.64)  # CH-3: card typed in (issuer unknown) → no Chase offer; Demo 1 spec amounts
     assert stage(ev) == "AWAITING_CONSENT"
 
     ev = turn(client, shopper, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
     states = [e["state"] for e in of(ev, "payment_status")]
     assert states == ["processing", "authorizing", "authorized"]
     order = of(ev, "order_confirmed")[0]["order"]
-    assert order["order_id"].startswith("SS-") and order["total"] == 118.7
+    assert order["order_id"].startswith("SS-") and order["total"] == 139.64
     assert stage(ev) == "ORDER_CONFIRMED"
 
     agents = [e["agent"] for e in of(ev, "status")]       # presenter trace
@@ -213,7 +214,7 @@ def test_declined_card_then_switch_and_pay(client, shopper):
     assert of(ev, "payment_status")[-1]["state"] == "declined"
     assert "No order was created" in of(ev, "message")[-1]["text"]
     assert stage(ev) == "AWAITING_CONSENT" and orders_for(co["checkout_id"]) == 0
-    good = client.post("/api/me/payment-methods", json={**VISA, "number": "5555 5555 5555 4444"}, headers=shopper).json()
+    good = add_card(client, shopper, {**VISA, "number": "5555 5555 5555 4444"}).json()
     ev = turn(client, shopper, sid, action={"type": "update_checkout", "payment_method_id": good["payment_method_id"]})
     assert of(ev, "checkout_updated")[0]["checkout"]["payment_method"]["display"] == "Mastercard •••• 4444"
     ev = turn(client, shopper, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
@@ -319,11 +320,50 @@ def test_item_already_in_cart_buys_only_what_the_chat_added(client, shopper):
     client.post("/api/cart/lines", json={"sku": "SSP001-BLACK-8"}, headers=shopper)
     sid = f"t-{uuid.uuid4().hex[:8]}"
     co = _to_review(client, shopper, sid)
-    assert co["lines"][0]["quantity"] == 1 and co["total"] == 118.7
+    assert co["lines"][0]["quantity"] == 1 and co["total"] == 139.64  # CH-3: card typed in (issuer unknown) → no Chase offer; Demo 1 spec amounts
     ev = turn(client, shopper, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
-    assert of(ev, "order_confirmed")[0]["order"]["total"] == 118.7
+    assert of(ev, "order_confirmed")[0]["order"]["total"] == 139.64
     left = [l for l in client.get("/api/cart/lines", headers=shopper).json()["lines"] if l["sku"] == "SSP001-BLACK-8"]
     assert len(left) == 1 and left[0]["quantity"] == 1
+
+
+def test_keep_shopping_then_a_second_item_checks_out_both(client, shopper):
+    sid = f"t-{uuid.uuid4().hex[:8]}"
+    turn(client, shopper, sid, action={"type": "select", "product_id": "SSP001"})
+    turn(client, shopper, sid, text="8")
+    turn(client, shopper, sid, text="black")
+    turn(client, shopper, sid, action={"type": "keep_shopping", "label": "Keep shopping"})
+    turn(client, shopper, sid, action={"type": "select", "product_id": "SSP049"})
+    ev = turn(client, shopper, sid, action={"type": "checkout", "label": "Checkout now"})
+    co = of(ev, "checkout_ready")[0]["checkout"]
+    assert sorted(l["sku"] for l in co["lines"]) == ["SSP001-BLACK-8", "SSP049-WHITE"]
+
+
+def test_items_added_as_a_visitor_survive_sign_in_when_the_cart_merges(client):
+    """The account's cart already holds the AirPods the visitor adds: sign-in
+    merges the two lines, and the chat's checkout still includes them."""
+    email = f"pytest-{uuid.uuid4().hex[:10]}@example.com"
+    client.post("/api/auth/register", json={"name": "Merge Shopper", "email": email, "password": "pytest1234"})
+    h = {"Authorization": "Bearer " + client.post("/api/auth/login", json={"email": email, "password": "pytest1234"}
+                                                  ).json()["access_token"]}
+    client.post("/api/me/addresses", json=HOME, headers=h)
+    add_card(client, h, VISA)
+    client.post("/api/cart/lines", json={"sku": "SSP049-WHITE"}, headers=h)
+
+    vh = {"Authorization": "Bearer " + client.post("/api/auth/visitor").json()["access_token"]}
+    sid = f"t-{uuid.uuid4().hex[:8]}"
+    turn(client, vh, sid, action={"type": "select", "product_id": "SSP049"})
+    turn(client, vh, sid, action={"type": "keep_shopping", "label": "Keep shopping"})
+    turn(client, vh, sid, action={"type": "select", "product_id": "SSP001"})
+    turn(client, vh, sid, text="8")
+    turn(client, vh, sid, text="black")
+    r = client.post("/api/auth/login", json={"email": email, "password": "pytest1234"}, headers=vh)
+    h = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    ev = turn(client, h, sid, action={"type": "checkout", "label": "Checkout now"})
+    co = (of(ev, "checkout_ready") or [{}])[0].get("checkout") or of(ev, "checkout_details_needed")[0]
+    lines = co["lines"] if "lines" in co else client.get(f"/api/checkouts/{co['checkout_id']}", headers=h).json()["lines"]
+    assert {l["sku"]: l["quantity"] for l in lines} == {"SSP001-BLACK-8": 1, "SSP049-WHITE": 1}
 
 
 def test_cart_already_holds_all_stock_is_not_a_dead_end(client, shopper):

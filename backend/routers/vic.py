@@ -26,11 +26,11 @@ from pydantic import BaseModel, Field
 from backend.auth.dependencies import CurrentUser, get_current_user
 from backend.db.schema import CardAccount, SimScenario, VicLifecycleEvent
 from backend.db.session_utils import get_session
-from backend.shop.eligibility import require_cardmember
+from backend.shop.eligibility import require_shopper
 from backend.vic import enrollment, instructions, signals
 from backend.vic.common import VicError, short
 
-router = APIRouter(prefix="/api/vic", tags=["vic-simulator"], dependencies=[Depends(require_cardmember)])
+router = APIRouter(prefix="/api/vic", tags=["vic-simulator"], dependencies=[Depends(require_shopper)])
 
 DISCLAIMER = ("Visa Intelligent Commerce-inspired LOCAL SIMULATION. Not connected to Visa or Chase; "
               "agent tokens are not Visa Token Service tokens.")
@@ -57,7 +57,7 @@ class EnrollComplete(CardRef, PasskeyAssertion):
 
 class NewInstruction(BaseModel):
     checkout_id: str = Field(..., max_length=50)
-    consent_mode: Literal["button", "typed", "auto_countdown"] = "button"
+    consent_mode: Literal["button", "typed"] = "button"           # CH-8: explicit approvals only
 
 
 class Scenario(BaseModel):
@@ -66,7 +66,7 @@ class Scenario(BaseModel):
 
 def status_view(db, user_id: str) -> dict:
     cards = (db.query(CardAccount).filter_by(user_id=user_id, account_type="credit_card", network="Visa",
-                                              status="active", marketplace_eligible=True).all())
+                                              status="active", agent_pay_capable=True).all())   # CH-9
     return {"simulated": True, "disclaimer": DISCLAIMER, "cards": [enrollment.view(db, user_id, a) for a in cards]}
 
 

@@ -128,7 +128,11 @@ class PaymentMethod(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     payment_method_id = Column(String(50), unique=True, nullable=False)
     user_id = Column(String(50), nullable=False, index=True)
-    brand = Column(String(20), nullable=False)       # Visa, Mastercard, Amex...
+    brand = Column(String(20), nullable=False)       # the card NETWORK: Visa, Mastercard, Amex, Discover
+    # CH-1: the issuing bank, separate from the network (CHASE, CITI, AMEX … / UNKNOWN); see backend/shop/cards.py
+    issuer = Column(String(30))
+    status = Column(String(20), default="active")    # active | suspended | closed
+    source = Column(String(20))                      # seeded | issuer_link | manual_legacy | provider_token
     last4 = Column(String(4), nullable=False)
     exp_month = Column(Integer, nullable=False)
     exp_year = Column(Integer, nullable=False)
@@ -143,10 +147,11 @@ class PaymentMethod(Base):
 
 
 class CardAccount(Base):
-    """A simulated issuer account (Part 2). Demo fixtures only — no real bank
-    or card-account verification. Marketplace eligibility comes from these:
-    an active, eligible Chase credit card. A checking/savings account alone
-    doesn't qualify. Card accounts link to the masked saved card used to pay."""
+    """A simulated issuer account (Chase, Citi, American Express …). Demo fixtures
+    only — no real bank or card-account verification. CH-2: these never decide
+    marketplace access; an active Chase credit card (marketplace_eligible, a legacy
+    column name) is the source of Chase benefits. Card accounts link to the masked
+    saved card used to pay and hold the simulated issuer's available credit."""
     __tablename__ = "card_accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -155,10 +160,13 @@ class CardAccount(Base):
     issuer = Column(String(30), nullable=False, default="Chase")      # simulated issuer
     account_type = Column(String(20), nullable=False)                   # credit_card | checking | savings
     product_name = Column(String(80), nullable=False)
-    network = Column(String(20))                                        # Visa | Mastercard (cards only)
+    network = Column(String(20))                                        # card network (cards only), e.g. Visa
     last4 = Column(String(4), nullable=False)
     status = Column(String(20), nullable=False, default="active")      # active | suspended | closed
     marketplace_eligible = Column(Boolean, nullable=False, default=False)
+    # CH-9: this Visa card supports agent payments (VIC-inspired) — a network capability flag
+    # set by the (simulated) issuer, NOT "is a Chase card". Only Visa cards can use it.
+    agent_pay_capable = Column(Boolean, nullable=False, default=False)
     payment_method_id = Column(String(50))                              # the masked saved card, if a card
     credit_limit = Column(Float)
     available_credit = Column(Float)
@@ -193,7 +201,8 @@ class CardVerificationAttempt(Base):
 
 
 class MemberOffer(Base):
-    """A ShopSphere cardmember offer (Part 2, demo). Not a real Chase or Visa benefit.
+    """A ShopSphere offer (demo). Not a real Chase or Visa benefit. CH-3: every offer
+    is a Chase credit-card benefit, decided by backend/shop/entitlements.py.
     kind: discount_percent | discount_amount (lower the price, before tax),
           bonus_points (extra points per $1 on matching items),
           cashback (simulated statement credit after an approved payment)."""
@@ -211,6 +220,25 @@ class MemberOffer(Base):
     audience = Column(String(30), nullable=False, default="all_cardmembers")   # | visa_agent_pay
     max_uses_per_member = Column(Integer)    # None = unlimited
     active = Column(Boolean, nullable=False, default=True)
+    # CH-3 eligibility rules (mocked, deterministic; see backend/shop/entitlements.py)
+    requires_issuer = Column(String(30))                     # e.g. CHASE: customer must hold that issuer's credit card
+    requires_payment_with_issuer = Column(Boolean, nullable=False, default=False)   # …and pay with it
+    requires_network = Column(String(20))                    # e.g. VISA
+    requires_payment_path = Column(String(20))               # e.g. vic
+    requires_enrollment = Column(Boolean, nullable=False, default=False)
+    starts_at = Column(DateTime)                             # None = no start date
+    ends_at = Column(DateTime)                               # None = no end date
+
+
+class OfferEnrollment(Base):
+    """A customer enrolled in an offer that needs enrollment (CH-3, mocked)."""
+    __tablename__ = "offer_enrollments"
+    __table_args__ = (UniqueConstraint("user_id", "offer_id", name="uq_offer_enrollment"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(50), nullable=False, index=True)
+    offer_id = Column(String(40), nullable=False)
+    enrolled_at = Column(DateTime, server_default=func.now())
 
 
 class OfferRedemption(Base):
@@ -258,6 +286,12 @@ class Checkout(Base):
     total = Column(Float, nullable=False, default=0.0)
     currency = Column(String(10), default="USD")
     checkout_hash = Column(String(64))
+    # CH-4: +1 whenever checkout_hash changes (what the customer approves is "version N of this order")
+    version = Column(Integer, nullable=False, default=1)
+    benefits_json = Column(Text)                       # Chase benefits applied / removed (with reasons)
+    # CH-6: a new card through the simulated secure payment provider
+    provider_session_id = Column(String(64))
+    pending_payment_ref = Column(String(60))
     consented_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -367,6 +401,9 @@ class PaymentAuthorization(Base):
     max_amount = Column(Float, nullable=False)
     currency = Column(String(10), default="USD")
     checkout_hash = Column(String(64))
+    checkout_version = Column(Integer)                 # CH-4: consent scope = merchant + order + amount + currency + version
+    action = Column(String(10))                        # PAY
+    consent_status = Column(String(20))                # approved | cancelled (CH-8)
     signature = Column(Text)
     approved_at = Column(DateTime)
     expires_at = Column(DateTime, nullable=False)
@@ -529,6 +566,7 @@ class PaymentInstruction(Base):
     merchant_id = Column(String(50), nullable=False)
     checkout_id = Column(String(50), nullable=False, index=True)
     checkout_hash = Column(String(64), nullable=False)
+    checkout_version = Column(Integer)                 # CH-4
     amount = Column(Float, nullable=False)
     currency = Column(String(10), nullable=False)
     max_transactions = Column(Integer, nullable=False, default=1)
@@ -614,6 +652,49 @@ class GatewayAuthorization(Base):
     payment_method_id = Column(String(50))                 # which card the issuer held (for voids)
     status = Column(String(20), nullable=False)            # approved | declined | timeout | voided
     response_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class ProviderPaymentSession(Base):
+    """CH-6: the SIMULATED Secure Payment Provider's own record of one hosted payment
+    page. In a real integration this lives with the PSP, not the merchant. It never
+    holds a card number or CVV: the hosted page only offers synthetic outcomes, and
+    the result ShopSphere may read is the safe one (token, network, last 4, reference)."""
+    __tablename__ = "provider_payment_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), unique=True, nullable=False)
+    merchant_id = Column(String(50), nullable=False)
+    checkout_id = Column(String(50), nullable=False, index=True)
+    payment_ref = Column(String(60), nullable=False)
+    checkout_version = Column(Integer, nullable=False)
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), nullable=False)
+    customer_ref = Column(String(50), nullable=False)
+    save_allowed = Column(Boolean, nullable=False, default=False)
+    return_url = Column(String(300))
+    # PENDING | TOKENIZED | VERIFICATION_REQUIRED | VERIFIED | CAPTURED | DECLINED | TIMEOUT | VERIFICATION_FAILED |
+    # CANCELLED | EXPIRED | VOIDED
+    status = Column(String(20), nullable=False, default="PENDING")
+    decline_reason = Column(String(40))
+    network = Column(String(20))
+    last4 = Column(String(4))
+    payment_token = Column(String(64))                  # opaque pm_mock_… (reusable only if save_requested)
+    authorization_reference = Column(String(64))
+    save_requested = Column(Boolean, nullable=False, default=False)
+    verification_required = Column(Boolean)              # decided by the provider when the card is tokenized
+    tokenized_at = Column(DateTime)
+    # simulated payment verification: a one-time challenge (only its hash is kept), attempts, result
+    challenge_hash = Column(String(64))
+    challenge_expires_at = Column(DateTime)
+    verification_attempts = Column(Integer, nullable=False, default=0)
+    verified_at = Column(DateTime)
+    # display metadata, kept only when the customer asked to save the card
+    cardholder_display = Column(String(80))
+    card_exp_month = Column(Integer)
+    card_exp_year = Column(Integer)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now())
 
 

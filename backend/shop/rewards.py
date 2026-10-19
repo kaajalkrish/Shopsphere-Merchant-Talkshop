@@ -89,4 +89,5 @@ def summary(db: Session, user_id: str) -> dict:
     return {"balance": bal, "value": round(bal / 100, 2), "lifetime_points": int(lp.lifetime_points) if lp else 0,
             "cashback_total": round(cash, 2), "offer_savings_total": round(saved, 2),
             "programme": "ShopSphere demo points (not a real Chase rewards programme)",
+            "earn_rate": "1 point per $1 for every customer; 2 per $1 when you pay with an eligible Chase credit card",
             "redemption_rate": "100 points = $1 off products, before tax"}

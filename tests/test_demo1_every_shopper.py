@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from backend.db.init_db import get_engine
 from backend.db.schema import EmailOutbox, Order, PaymentMethod, User, Wallet
 from backend.main import app
+from tests.conftest import pay_with_provider, scoped_consent, add_card
 
 HOME = {"full_name": "Test Shopper", "line1": "1 Main St", "city": "Austin", "state": "TX", "postal_code": "78701"}
 CARD = {"number": "4242 4242 4242 4242", "exp_month": 12, "exp_year": 2030, "cvc": "123", "cardholder_name": "Test"}
@@ -78,7 +79,7 @@ def checkout(client, h, guest=False):
 
 
 def confirm(client, h, co_id):
-    r = client.post(f"/api/checkouts/{co_id}/confirm", json={"consent": True}, headers=h)
+    r = client.post(f"/api/checkouts/{co_id}/confirm", json=scoped_consent(client, h, co_id), headers=h)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -94,7 +95,7 @@ def member_buys(client):
     checkout_id, confirm result)."""
     h, email = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
+    add_card(client, h, CARD)
     uid = client.get("/api/auth/me", headers=h).json()["user_id"]
     co = checkout(client, h)
     return h, uid, email, co["checkout_id"], confirm(client, h, co["checkout_id"])
@@ -118,7 +119,7 @@ def track(client, order_id, email, path=""):
 def test_1_customer_with_saved_card(client):
     h, email = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
+    add_card(client, h, CARD)
     co = checkout(client, h)
     assert co["ready"] and co["payment_method"]["display"] == "Visa •••• 4242"   # no card re-entry
     res = confirm(client, h, co["checkout_id"])
@@ -132,8 +133,11 @@ def test_1_customer_with_saved_card(client):
 # ── 2. Existing customer + wallet ────────────────────────────────────────────
 
 def test_2_customer_pays_with_wallet(client):
+    """CH-2: the wallet is for every customer, and checkout is for credit-card
+    holders, so the customer has a credit card on file and chooses the wallet."""
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
+    add_card(client, h, CARD)
     before = client.get("/api/wallet", headers=h).json()["balance"]
     co = checkout(client, h)
     co = client.patch(f"/api/checkouts/{co['checkout_id']}", json={"pay_with": "wallet"}, headers=h).json()
@@ -158,16 +162,20 @@ def test_2b_wallet_too_low_is_declined_without_an_order(client):
 # ── 3. Existing customer without a saved card ────────────────────────────────
 
 def test_3_no_saved_card_uses_secure_payment_and_saves_only_if_asked(client):
+    """CH-6: no saved card → a new card on the Simulated Secure Payment Provider's page;
+    the card is kept (as a provider token) only when the customer ticks "save" there."""
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
     co = checkout(client, h)
     assert any(i["code"] == "NO_PAYMENT_METHOD" for i in co["issues"])        # doesn't fail: asks for a card
-    once = client.post("/api/me/payment-methods", json={**CARD, "save": False}, headers=h).json()
-    assert once["saved"] is False and client.get("/api/me/payment-methods", headers=h).json() == []
-    client.patch(f"/api/checkouts/{co['checkout_id']}", json={"payment_method_id": once["payment_method_id"]}, headers=h)
-    assert confirm(client, h, co["checkout_id"])["status"] == "authorized"
-    kept = client.post("/api/me/payment-methods", json={**CARD, "save": True}, headers=h).json()
-    assert [c["payment_method_id"] for c in client.get("/api/me/payment-methods", headers=h).json()] == [kept["payment_method_id"]]
+    once = pay_with_provider(client, h, co["checkout_id"], "visa", save=False)
+    assert once["status"] == "authorized" and once["saved_payment_method"] is None
+    assert client.get("/api/me/payment-methods", headers=h).json() == []
+    co2 = checkout(client, h)
+    kept = pay_with_provider(client, h, co2["checkout_id"], "mastercard", save=True)
+    assert kept["status"] == "authorized" and kept["saved_payment_method"]["source"] == "provider_token"
+    assert [c["payment_method_id"] for c in client.get("/api/me/payment-methods", headers=h).json()] == \
+        [kept["saved_payment_method"]["payment_method_id"]]
 
 
 # ── 4. New customer (sign up) ────────────────────────────────────────────────
@@ -177,7 +185,7 @@ def test_4_new_customer_signs_up_and_buys(client):
     co = checkout(client, h)
     assert {i["code"] for i in co["issues"]} >= {"NO_ADDRESS", "NO_PAYMENT_METHOD"}
     addr = client.post("/api/me/addresses", json=HOME, headers=h).json()       # the secure forms attach what they save
-    card = client.post("/api/me/payment-methods", json=CARD, headers=h).json()
+    card = add_card(client, h, CARD).json()
     client.patch(f"/api/checkouts/{co['checkout_id']}", headers=h,
                  json={"address_id": addr["address_id"], "payment_method_id": card["payment_method_id"]})
     res = confirm(client, h, co["checkout_id"])
@@ -270,16 +278,32 @@ def to_offer(client, h):
 
 
 
-def test_talkshop_customer_without_card_can_use_wallet(client, quiet_llm):
+def test_talkshop_customer_without_a_credit_card_cannot_pay_even_with_wallet(client, quiet_llm):
+    """CH-2: checkout is for credit-card holders. A customer with no credit card is
+    asked for one; switching to the wallet doesn't get round that (nothing charged)."""
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
     sid = to_offer(client, h)
     ev = say(client, h, sid, action={"type": "checkout"})
     need = first(ev, "checkout_details_needed")
     assert need["needs"]["payment"] and need["wallet"]["balance"] > 0 and not need["guest"]
+    assert "credit-card holders" in first(ev, "message")["text"]
     ev = say(client, h, sid, action={"type": "details_added", "pay_with": "wallet", "label": "Pay with wallet"})
     co = first(ev, "checkout_ready")["checkout"]
-    assert co["pay_with"] == "wallet"
+    assert co["pay_with"] == "wallet" and not co["ready"]
+    assert any(i["code"] == "CREDIT_CARD_REQUIRED" for i in co["issues"])
+    ev = say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
+    assert not [e for e in ev if e["type"] == "order_confirmed"]
+
+
+def test_talkshop_card_holder_can_pay_with_wallet(client, quiet_llm):
+    h, _ = customer(client)
+    client.post("/api/me/addresses", json=HOME, headers=h)
+    add_card(client, h, CARD)
+    sid = to_offer(client, h)
+    co = first(say(client, h, sid, action={"type": "checkout"}), "checkout_ready")["checkout"]
+    ev = say(client, h, sid, action={"type": "update_checkout", "pay_with": "wallet"})
+    assert first(ev, "checkout_updated")["checkout"]["ready"]
     ev = say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
     assert first(ev, "order_confirmed")["order"]["payment"]["display"] == "ShopSphere Wallet"
 
@@ -322,7 +346,7 @@ def test_chat_tracking_with_the_email_typed_in(client, quiet_llm):
 def test_chat_shows_a_customers_own_order_without_email(client, quiet_llm):
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
+    add_card(client, h, CARD)
     order_id = confirm(client, h, checkout(client, h)["checkout_id"])["order"]["order_id"]
     ev = say(client, h, f"trk-{uuid.uuid4().hex[:8]}", text=f"track my order {order_id}")
     assert first(ev, "order_tracking")["order"]["order_id"] == order_id
@@ -397,23 +421,23 @@ def test_email_failure_never_undoes_the_order(client, smtp, monkeypatch):
 
 # ── Automatic payment after the review countdown ─────────────────────────────
 
-def test_auto_countdown_payment_records_how_consent_was_given(client, quiet_llm):
+def test_automatic_payment_is_refused_and_only_a_tap_pays(client, quiet_llm):
+    """CH-8: no automatic or countdown consent. A go-ahead claiming one charges nothing;
+    the shopper's own tap pays, and the consent record says so."""
     import json as _j
     from backend.db.schema import AuditEvent
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
-    modes = []
-    for consent in ("auto_countdown", None):
-        sid = to_offer(client, h)
-        co = first(say(client, h, sid, action={"type": "checkout"}), "checkout_ready")["checkout"]
-        action = {"type": "go_ahead", "checkout_id": co["checkout_id"], **({"consent": consent} if consent else {})}
-        assert first(say(client, h, sid, action=action), "order_confirmed")
-        with Session(get_engine()) as db:
-            ev = (db.query(AuditEvent).filter(AuditEvent.event_type == "CHECKOUT_CONSENT",
-                                              AuditEvent.order_id.like(f"{co['checkout_id']}-%")).one())
-            modes.append(_j.loads(ev.metadata_json)["mode"])
-    assert modes == ["auto_countdown", "button"]
+    add_card(client, h, CARD)
+    sid = to_offer(client, h)
+    co = first(say(client, h, sid, action={"type": "checkout"}), "checkout_ready")["checkout"]
+    ev = say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"], "consent": "auto_countdown"})
+    assert not [e for e in ev if e["type"] == "order_confirmed"] and "Nothing was charged" in first(ev, "message")["text"]
+    assert first(say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]}), "order_confirmed")
+    with Session(get_engine()) as db:
+        ev = (db.query(AuditEvent).filter(AuditEvent.event_type == "CHECKOUT_CONSENT",
+                                          AuditEvent.order_id.like(f"{co['checkout_id']}-%")).one())
+    assert _j.loads(ev.metadata_json)["mode"] == "button"
 
 
 def test_made_up_addresses_are_not_mailed(client, smtp):
@@ -435,7 +459,7 @@ def _buy(client, h, sku):
 def test_logged_in_customer_asks_by_product_name(client, quiet_llm):
     h, _ = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
+    add_card(client, h, CARD)
     shoes = _buy(client, h, "SSP004-TEAL-10")          # Nike Pegasus 41
     wallet = _buy(client, h, "SSP046-BLACK")            # newer order
     ev = say(client, h, f"own-{uuid.uuid4().hex[:6]}", text="hey i placed an order of nike shoes, where is it?")
@@ -466,7 +490,7 @@ def _points(client, h):
 def _ready_customer(client):
     h, email = customer(client)
     client.post("/api/me/addresses", json=HOME, headers=h)
-    client.post("/api/me/payment-methods", json=CARD, headers=h)
+    add_card(client, h, CARD)
     return h, email
 
 
@@ -530,9 +554,9 @@ def test_talkshop_points_question_and_review_toggle(client, quiet_llm):
     ev = say(client, h, sid, action={"type": "update_checkout", "points_used": 1415})
     upd = first(ev, "checkout_updated")["checkout"]
     assert upd["points_discount"] == 14.15 and upd["total"] < co["total"]
-    vh, _ = visitor(client)                                      # visitors can chat, but points are for cardmembers
+    vh, _ = visitor(client)                                      # visitors can chat; points come with an account
     ev = say(client, vh, f"pts-{uuid.uuid4().hex[:6]}", text="my loyalty points?")
-    assert "points are for cardmembers" in first(ev, "message")["text"]
+    assert "points are for every ShopSphere customer" in first(ev, "message")["text"]
 
 
 # ── Live guardrail trace (info view) ─────────────────────────────────────────
@@ -545,7 +569,7 @@ def test_trace_covers_every_step_of_a_purchase(client, quiet_llm):
     h, _ = _ready_customer(client)
     sid = to_offer(client, h)
     co = first(say(client, h, sid, action={"type": "checkout"}), "checkout_ready")["checkout"]
-    ev = say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"], "consent": "auto_countdown"})
+    ev = say(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
     g = _guards(ev)
     payit = [x for x in g if x["agent"] == "PayIt" and x["check"].startswith("DPAT check ")]
     assert len(payit) == 12 and all(x["result"] == "pass" for x in payit)
@@ -555,7 +579,7 @@ def test_trace_covers_every_step_of_a_purchase(client, quiet_llm):
                  ("Simulated Visa network", "Simulated Visa network"), ("Simulated card issuer", "Simulated card issuer"),
                  ("TrackIt", "Order confirmed"), ("TrackIt", "Confirmation email")]:
         assert want in names, want
-    assert "Automatic after the 3-second countdown" in next(x for x in g if x["check"] == "Consent gate")["detail"]
+    assert "Approve & Pay tapped" in next(x for x in g if x["check"] == "Consent gate")["detail"]
     assert all(x["protocol"] for x in g)                                  # every check is tagged with its protocol
 
 

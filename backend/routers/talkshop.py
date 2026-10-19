@@ -21,9 +21,9 @@ from pydantic import BaseModel, Field
 from backend.auth.dependencies import CurrentUser, get_current_user
 from backend.talkshop import orchestrator, state
 
-# Open to every session: guests and non-eligible customers can search and get
-# recommendations. Adding to cart, checkout and payment are refused inside the
-# orchestrator (and by the cardmember-only shop services) for non-members.
+# Open to every session: visitors search, get recommendations and fill a cart.
+# Checkout needs a signed-in customer and paying a credit card (any issuer);
+# both are enforced in the orchestrator and again by the shop services (CH-2).
 router = APIRouter(tags=["talkshop"])
 
 

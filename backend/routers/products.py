@@ -1,8 +1,7 @@
 """
-ShopSphere catalog API. Browsing is open to everyone (guests and customers
-without an eligible card see regular prices). Member extras — offers and the
-points a purchase earns — are added only for eligible cardmembers. Cart,
-checkout, offers, rewards and payment stay cardmember-only (shop router).
+ShopSphere catalog API. Browsing is open to everyone. Signed-in customers also
+get the points a purchase earns; offers appear only for Chase credit-card holders
+(CH-2: offers are a Chase benefit). Checkout and payment are in the shop router.
 
   GET /api/products                          search + filters + sort
   GET /api/products/{id}                     product detail with every variant (SKU)
@@ -27,8 +26,10 @@ def get_db():
 
 
 def _member_offers(db: Session, user: CurrentUser):
-    """The member's offers, or None for a non-member (no member extras at all)."""
-    if eligibility.check(db, user) is not None:
+    """Server-computed extras for a signed-in customer: their Chase offers ([] unless
+    they hold an eligible Chase credit card — offers are a Chase benefit) and points.
+    None for a visitor (no extras shown)."""
+    if eligibility.check_access(db, user) is not None:
         return None
     return offers.entitled(db, user.user_id)
 

@@ -22,7 +22,7 @@ interface PasskeyContextValue {
   /** Visa path: create the instruction for this exact checkout and authenticate it.
    *  Resolves to the instruction id, or throws (cancelled / failed / server refusal). */
   approveAgentPayment: (checkoutId: string, info: { amount: number; card?: string },
-                        consentMode?: "button" | "typed" | "auto_countdown") => Promise<string>;
+                        consentMode?: "button" | "typed") => Promise<string>;
   enrollAgentPay: (cardAccountId: string, card: string) => Promise<void>;
   open: boolean;
 }
@@ -42,7 +42,7 @@ export function PasskeyProvider({ children }: { children: ReactNode }) {
   const answer = (o: Outcome) => { setPrompt(null); resolver.current?.(o); resolver.current = null; };
 
   const approveAgentPayment = useCallback(async (checkoutId: string, info: { amount: number; card?: string },
-                                                 consentMode: "button" | "typed" | "auto_countdown" = "button") => {
+                                                 consentMode: "button" | "typed" = "button") => {
     const { instruction, passkey } = await vic.createInstruction(checkoutId, consentMode);
     const outcome = await ask({
       title: "Approve this payment", purpose: "payment",

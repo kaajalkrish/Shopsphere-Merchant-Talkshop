@@ -14,7 +14,7 @@ import { OrderDetailPage, OrdersPage } from "./pages/store/Orders";
 import TrackOrderPage from "./pages/store/Track";
 import { OffersPage, RewardsPage } from "./pages/store/Member";
 import AccountPage from "./pages/store/Account";
-import { MemberProvider, useMember } from "./member/MemberContext";
+import { MemberProvider } from "./member/MemberContext";
 import MemberGate from "./pages/store/MemberGate";
 import { PasskeyProvider } from "./member/PasskeyContext";
 
@@ -25,22 +25,15 @@ function AuthReady({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-/** My Orders needs an account: visitors log in, then come back. (Part 2: the
- *  whole marketplace is for eligible cardmembers; StoreLayout shows the gate
- *  page otherwise, and the server refuses every marketplace API.) */
+/** Checkout, orders, offers, rewards and account need a ShopSphere account (any
+ *  credit-card holder, CH-2): visitors sign in or sign up, then come back. Search,
+ *  products, Talkshop, the cart and order tracking are open to everyone. The
+ *  server enforces the same rules. */
 function RequireCustomer({ children }: { children: ReactNode }) {
   const { isCustomer } = useAuth();
   const location = useLocation();
   if (!isCustomer) return <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />;
   return <>{children}</>;
-}
-
-/** Cart, checkout, orders, offers, rewards and account are for eligible
- *  cardmembers. Everyone else sees the membership page (sign in, create an
- *  account, or verify a card); the server enforces the same rule. */
-function RequireMember({ children }: { children: ReactNode }) {
-  const { eligible } = useMember();
-  return eligible ? <>{children}</> : <MemberGate />;
 }
 
 export default function App() {
@@ -53,21 +46,21 @@ export default function App() {
           <AuthReady>
             <Routes>
               <Route path="/login" element={<Login />} />
-              {/* One layout keeps Talkshop mounted across pages; it shows the member gate to non-members */}
+              {/* One layout keeps Talkshop mounted across pages */}
               <Route element={<StoreLayout />}>
                 <Route path="/" element={<StoreHome />} />
                 <Route path="/c/:slug" element={<Category />} />
                 <Route path="/search" element={<Category />} />
                 <Route path="/p/:productId" element={<ProductPage />} />
                 <Route path="/membership" element={<MemberGate />} />
-                <Route path="/cart" element={<RequireMember><CartPage /></RequireMember>} />
-                <Route path="/checkout/:checkoutId" element={<RequireMember><CheckoutPage /></RequireMember>} />
-                <Route path="/track" element={<RequireMember><TrackOrderPage /></RequireMember>} />
-                <Route path="/offers" element={<RequireMember><OffersPage /></RequireMember>} />
-                <Route path="/rewards" element={<RequireMember><RewardsPage /></RequireMember>} />
-                <Route path="/account" element={<RequireMember><AccountPage /></RequireMember>} />
-                <Route path="/orders" element={<RequireMember><OrdersPage /></RequireMember>} />
-                <Route path="/orders/:orderId" element={<RequireMember><OrderDetailPage /></RequireMember>} />
+                <Route path="/cart" element={<CartPage />} />
+                <Route path="/track" element={<TrackOrderPage />} />
+                <Route path="/checkout/:checkoutId" element={<RequireCustomer><CheckoutPage /></RequireCustomer>} />
+                <Route path="/offers" element={<RequireCustomer><OffersPage /></RequireCustomer>} />
+                <Route path="/rewards" element={<RequireCustomer><RewardsPage /></RequireCustomer>} />
+                <Route path="/account" element={<RequireCustomer><AccountPage /></RequireCustomer>} />
+                <Route path="/orders" element={<RequireCustomer><OrdersPage /></RequireCustomer>} />
+                <Route path="/orders/:orderId" element={<RequireCustomer><OrderDetailPage /></RequireCustomer>} />
               </Route>
               <Route path="/dashboard" element={<Navigate to="/orders" replace />} />
               <Route path="/assistant" element={<Navigate to="/" replace />} />

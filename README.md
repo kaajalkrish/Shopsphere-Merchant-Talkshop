@@ -14,9 +14,12 @@ It's a working prototype of the same problem Stripe's [Agentic Commerce Protocol
 > Every identity, account, card, reward, token and payment here is a **local simulation**. No Visa or Chase API is
 > called, nothing is "VIC compliant", and the agent tokens are not Visa Token Service tokens.
 
-ShopSphere is now a **restricted marketplace for eligible Chase credit-card members** (simulated). Guests and
-checking-only customers can't browse the catalog or call any marketplace API: the server checks eligibility on every
-request (`require_cardmember`), not just the UI. **Talkshop AI** stays docked on the right. An eligible Visa member pays
+**General cardholder update (CH-2, in progress — see
+[`docs/shopsphere-cardholder-execution-plan.md`](docs/shopsphere-cardholder-execution-plan.md)):** ShopSphere is for
+**every credit-card holder**. Anyone can search, browse, use Talkshop and fill a cart; checkout needs a signed-in
+ShopSphere account (any card issuer); paying needs a credit card. **Chase status is an entitlement, not the gate:**
+offers are exclusive to Chase credit-card holders **and apply only when the order is paid with the Chase card** (CH-3, `backend/shop/entitlements.py`); Chase cards also earn 2× ShopSphere points. The server enforces all of this on every request
+(`backend/shop/eligibility.py`), not just the UI. **Talkshop AI** stays docked on the right. An eligible Visa member pays
 through a **VIC-inspired flow**: approve the exact order → simulated passkey → GreenLight DPAT + PayIt's 12 checks →
 12 VIC-inspired controls → one-time purchase credential → mock gateway → simulated Visa network → simulated Chase
 issuer → commerce signal → order. Mastercard members use the standard card path through the same gateway.
@@ -48,18 +51,60 @@ do this). `python -m backend.db.reset_demo --yes` (backend stopped) gives a fres
 
 | | Persona | Simulated accounts | What happens |
 |---|---|---|---|
-| **A** | Kaajal · `kaajal@shopsphere.demo` | Chase Visa credit •••• 4821 (agent token **ACTIVE**), Chase Mastercard •••• 0019 (issuer declines) | Full marketplace; Visa agent payments with passkey; 12,500 welcome points |
-| **B** | Marcus · `marcus@shopsphere.demo` | Chase Mastercard credit •••• 5510 | Marketplace; **standard** card path (no VIC token services) |
-| **C** | Priya · `priya@shopsphere.demo` | Chase checking •••• 7702 only | **Browse only**: products at regular prices and Talkshop to find things; cart, checkout, offers and points return 403 `NO_ELIGIBLE_CARD` ("Verify a Chase card to buy") |
-| **D** | Guest (not signed in) | — | **Browse only**: products and Talkshop; buying returns 403 `LOGIN_REQUIRED` and Talkshop shows a sign-in card. After signing in, the conversation carries on and the chosen item is added |
-| **E** | Elena · `elena@shopsphere.demo` | Chase Visa credit •••• 4002 (agent token **NOT_ENROLLED**) | Can browse; must set up agent payments (simulated passkey) before a Visa agent payment |
+| **A** | Kaajal · `kaajal@shopsphere.demo` | Chase Visa credit •••• 4821 (agent token **ACTIVE**), Chase Mastercard •••• 0019 (issuer declines) | Chase benefits (offers); Visa agent payments with passkey; 12,500 welcome points |
+| **B** | Marcus · `marcus@shopsphere.demo` | Chase Mastercard credit •••• 5510 | Chase benefits; **standard** card path (no VIC token services) |
+| **C** | Priya · `priya@shopsphere.demo` | Chase checking •••• 7702 only | A customer with **no credit card yet**: can shop and review a checkout, can't pay (`CREDIT_CARD_REQUIRED` / "add a credit card"); no Chase offers |
+| **D** | Guest (not signed in) | — | Search, browse, Talkshop and a **cart**; checkout returns 403 `LOGIN_REQUIRED` and Talkshop shows a sign-in / sign-up card. Afterwards the conversation and cart carry on to checkout |
+| **E** | Elena · `elena@shopsphere.demo` | Chase Visa credit •••• 4002 (agent token **NOT_ENROLLED**) | Chase benefits; must set up agent payments (simulated passkey) before a Visa agent payment |
+| **F** | Dana · `dana@shopsphere.demo` | **Citi Mastercard** •••• 5678 | Scenario 1: buys with her saved card; ShopSphere pricing + points; **no** Chase offers |
+| **G** | Ravi · `ravi@shopsphere.demo` | **American Express** •••• 9012 | Scenario 1 on the Amex network; standard card path |
+| **H** | Chris · `chris@shopsphere.demo` | **Chase Visa** •••• 1234 (agent token **ACTIVE**) + Citi Mastercard •••• 5678 | Scenario 2: Chase offers + 2× points when paying with the Chase Visa; switching to the Citi card (or wallet) removes them; not enrolled in 3× clothing points (Enroll on the offers page) |
+
+### Demo script: the three cardholder scenarios (CH-1 … CH-11)
+
+> The business message: **ShopSphere supports credit-card holders generally. Chase cardholder status adds eligible
+> Chase-specific benefits rather than controlling access to the marketplace. Existing customers can use saved,
+> tokenized payment methods; new customers are handed off to a payment-provider-controlled page without exposing raw
+> card credentials to Talkshop.** Everything below is simulated. Open Talkshop's info view (ⓘ) to show the live trace.
+
+1. **Scenario 1: a non-Chase cardholder.** Sign in as **F · Dana** (Citi Mastercard ••5678) or **G · Ravi** (Amex
+   ••9012). Ask Talkshop for "running shoes under $150", pick a size and colour, then check out. The review shows the
+   regular price with **no Chase offer**, 1× points, and the saved card. Tap **Approve & Pay**. Trace: *Customer access*
+   (any issuer) → *Cardholder & benefits* → *Payment route* (saved token → simulated Mastercard/Amex network → simulated
+   Citi/Amex issuer) → *Consent scope* → 12 PayIt checks → order.
+2. **Scenario 2: a Chase cardholder.** Sign in as **H · Chris** (Chase Visa ••1234 + Citi Mastercard ••5678). The same
+   shoes now show **15% off with your Chase card** and **2× points**. Switch the payment card to the **Citi Mastercard**:
+   the review says *Chase benefits not applied: pay with your Chase credit card* and the total goes up (a new checkout
+   version). Switch back, tap **Approve & Pay**, and confirm with the simulated passkey (Visa agent payment, VIC-inspired).
+   Offers page: Chris isn't enrolled in "3× points on clothing", so click **Enroll**.
+3. **Scenario 3: a new ShopSphere user.** Start signed out. Find shoes with Talkshop and add them to the cart, then
+   choose checkout. Talkshop's card offers **Create an account here** (name, email, password, never a card). The
+   conversation and cart carry on. Add an address, choose **Pay with a new card**, and tap **Continue to Secure
+   Payment**. The **Secure Payment Sheet** slides up over Talkshop (no new window, the conversation stays underneath).
+   The card form inside it is the simulated payment provider's own page, which ShopSphere and Talkshop can't read. Enter
+   a **test card**: `4242 4242 4242 4242` (Visa), `5555 5555 5555 4444` (Mastercard), `3782 822463 10005` (Amex), any
+   future expiry, any CVC. The provider secures it ("✓ Card secured · Visa •••• 4242"), then asks for a **simulated
+   payment verification** (Verify payment, Cancel, or *Simulate failed verification*). Once verified you're back in
+   Talkshop: GreenLight and PayIt run their checks, PayIt asks the provider to authorize this exact amount, and you see
+   "✓ Payment verified · Visa •••• 4242 · $X authorized · Creating your order…" and then the order confirmation.
+   Other test cards: `4000 0000 0000 3055` needs no verification, `4000 0000 0000 0002` declines,
+   `4000 0000 0000 9995` declines for insufficient funds, `4000 0000 0000 0119` times out, `4000 0000 0000 0101`
+   can't be secured. Any other number is refused, so real cards are never used. *Save this payment method* is unticked by
+   default; if ticked, ShopSphere keeps only a token, the network, the last 4, the expiry and the name on the card.
+   Closing the sheet (✕) or cancelling verification takes you back to the review: nothing is charged.
+
+Failure demos: Kaajal's Mastercard ••0019 (issuer decline); provider decline / timeout test cards or an expired session (no order); a new customer choosing the Wallet ("Why you can't approve yet": the Wallet needs a saved credit card, with a *Pay with a new card instead* button);
+change the order in another tab before approving (**STALE_CHECKOUT**, nothing charged); tap Approve twice (one
+payment); Account → demo outcomes for gateway decline/timeout/duplicate.
 
 ### New customers: create an account
 
-**Sign in → Create account.** Enter the **same name and email as your Chase account** and the **last four digits** of
-your Chase credit card, plus a password. ShopSphere checks all three against a **simulated Chase cardholder
-directory** (`issuer_cardholders`); only a match creates the account and links the cardholder's cards (Visa →
-agent payments set up on first purchase; Mastercard → standard path). A mismatch gets one generic message (no hint
+**Sign in → Create account** with a name, email and password: a plain ShopSphere account (no card details asked).
+**Optional:** tick "I have a Chase credit card" to also link Chase benefits: enter the **same name and email as your
+Chase account** and the **last four digits** of your Chase credit card. ShopSphere checks all three against a
+**simulated Chase cardholder directory** (`issuer_cardholders`); a match links the cardholder's Chase cards (Visa →
+agent payments set up on first purchase; Mastercard → standard path). Typing a full card number into ShopSphere is
+switched off (CH-2); adding a new card will go through a simulated secure payment provider (CH-6). A mismatch gets one generic message (no hint
 which field was wrong), 5 failed tries lock that email for 15 minutes, a checking-only match is refused, and a card
 can be linked to one account only. Never a full card number or CVV.
 
@@ -70,8 +115,8 @@ record in `.env`, which git ignores:
 ```
 DEMO_CARDHOLDERS=Your Name|you@gmail.com|4417|Visa;Your Name|you@gmail.com|5562|Mastercard
 ```
-Signed-in accounts without a card (e.g. created before Part 2) can verify one on the "not eligible" page with the last
-four digits; their account name and email must match. A real bank would add a second factor (a one-time code to the
+Signed-in customers can link a Chase card later on the **Chase card benefits** page (`/membership`) with the last four
+digits; their account name and email must match. A real bank would add a second factor (a one-time code to the
 email or phone on file); the last four digits alone don't prove ownership.
 
 ### Walkthrough (Persona A)

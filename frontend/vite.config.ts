@@ -8,7 +8,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // Backend to proxy to; override with TALKSHOP_API (e.g. when :8000 is taken)
+        target: process.env.TALKSHOP_API ?? "http://localhost:8000",
         changeOrigin: true,
       },
     },

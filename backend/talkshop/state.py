@@ -77,9 +77,12 @@ class Session:
     line_ids: list[str] = field(default_factory=list)       # cart lines Talkshop added in this conversation
     added_qty: dict[str, int] = field(default_factory=dict)  # how many of each line Talkshop added
     checkout_id: Optional[str] = None
+    # CH-4: the invoice the shopper was last shown ({checkout_id, checkout_version, final_amount, currency}).
+    # "Approve and pay" approves exactly this; if the order changed since, nothing is charged.
+    shown_invoice: Optional[dict] = None
     order_id: Optional[str] = None
     is_visitor: bool = False                                # not logged in yet (Phase 8)
-    member_ok: bool = False                                 # eligible cardmember: may add to cart, check out, pay
+    access_ok: bool = False                                 # signed-in customer: may check out (CH-2; any issuer)
     wants: dict = field(default_factory=dict)               # size/colour asked for while searching — kept across picks
     history: list[dict] = field(default_factory=list)       # [{"role": "user"|"assistant", "text": ...}] for the LLM
     transcript: list[dict] = field(default_factory=list)    # every event sent, so the panel can rebuild itself
@@ -109,9 +112,19 @@ def drop(user_id: str, session_id: str) -> None:
     _sessions.pop((user_id, session_id), None)
 
 
-def rekey(old_user: str, new_user: str) -> None:
-    """A visitor logged in: their conversations now belong to the account."""
+def rekey(old_user: str, new_user: str, line_map: Optional[dict[str, str]] = None) -> None:
+    """A visitor logged in: their conversations now belong to the account.
+    `line_map` (old cart line id → new) follows lines merged into the account's
+    cart, so what Talkshop added still reaches checkout."""
+    line_map = line_map or {}
     for (uid, sid) in [k for k in _sessions if k[0] == old_user]:
         sess = _sessions.pop((uid, sid))
         sess.user_id = new_user
+        ids, qty = [], {}
+        for lid in sess.line_ids:
+            new_id = line_map.get(lid, lid)
+            if new_id not in ids:
+                ids.append(new_id)
+            qty[new_id] = qty.get(new_id, 0) + sess.added_qty.get(lid, 1)
+        sess.line_ids, sess.added_qty = ids, qty
         _sessions[(new_user, sid)] = sess

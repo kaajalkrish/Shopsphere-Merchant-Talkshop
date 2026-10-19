@@ -22,7 +22,9 @@ export type TalkEvent =
   | { type: "cart_updated"; cart: Cart; added_line_id: string }
   | { type: "offer_checkout"; choices: { value: string; label: string }[] }
   | { type: "checkout_ready" | "checkout_updated"; checkout: Checkout }
-  | { type: "payment_status"; state: "processing" | "authorizing" | "authorized" | "declined" | "failed"; payment: string | null; reason?: string; message?: string }
+  | { type: "payment_status"; state: "processing" | "authorizing" | "authorized" | "declined" | "failed" | "handoff" | "cancelled"; payment: string | null; reason?: string; message?: string }
+  /** CH-6: continue on the Simulated Secure Payment Provider's own page (Talkshop never sees the card). */
+  | { type: "provider_handoff"; checkout_id: string; payment_session_id: string; hosted_url: string; amount: number; currency: string }
   | { type: "order_confirmed"; order: Order; email?: string | null }
   | { type: "track_order_form"; order_id: string | null }
   | { type: "order_tracking"; order: TrackedOrder }
@@ -35,7 +37,7 @@ export type TalkEvent =
   | { type: "guardrail"; agent: string; check: string; result: "pass" | "blocked" | "info"; detail: string; protocol: string;
       layer?: "local" | "simulated" }
   /** Visa agent-payment path: the member must confirm this exact order with a simulated passkey (Part 2). */
-  | { type: "approval_required"; checkout_id: string; consent_mode: "button" | "typed" | "auto_countdown";
+  | { type: "approval_required"; checkout_id: string; consent_mode: "button" | "typed";
       amount: number; currency: string; merchant: string; payment: string | null }
   /** Persona E: agent payments must be set up for this Visa before paying through Talkshop. */
   | { type: "agent_pay_setup"; checkout_id: string; card_account_id: string }
@@ -46,9 +48,13 @@ export type TalkAction =
   | { type: "select" | "ask_about"; product_id: string }
   | { type: "choose_size" | "choose_color"; value: string }
   | { type: "checkout"; guest?: boolean } | { type: "keep_shopping" } | { type: "cancel_checkout" }
-  | { type: "update_checkout"; delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet"; points_used?: number; quantities?: Record<string, number> }
+  | { type: "update_checkout"; delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number> }
   // Only from the member's Approve and pay tap (consent "typed": GO AHEAD typed on the Visa path, still needs the passkey)
-  | { type: "go_ahead"; checkout_id: string; consent?: "typed"; instruction_id?: string }
+  | { type: "go_ahead"; checkout_id: string; consent?: "typed"; instruction_id?: string;
+      /** CH-4: the invoice the shopper approved (the server compares; nothing is charged if it changed) */
+      checkout_version?: number; final_amount?: number; currency?: string;
+      /** CH-6: this page's address, so the payment provider's embedded form can tell it when it's done */
+      return_url?: string }
   // Part 2: the member closed the passkey prompt (nothing approved); agent payments were just set up
   | { type: "approval_cancelled" } | { type: "agent_pay_ready" }
   // Back after signing in / verifying a card: add the item chosen before
@@ -56,7 +62,11 @@ export type TalkAction =
   // Order ID + email typed into the secure lookup card (not chat text)
   | { type: "track_order"; order_id: string; email: string }
   // A secure form saved the detail on ShopSphere; Talkshop gets only the id.
-  | { type: "details_added"; address_id?: string; payment_method_id?: string; pay_with?: "wallet" };
+  | { type: "details_added"; address_id?: string; payment_method_id?: string; pay_with?: "wallet" | "provider" }
+  // CH-6: the shopper finished on the provider's page; ShopSphere asks the provider for the result
+  | { type: "provider_complete"; checkout_id: string; payment_session_id: string }
+  // The shopper closed the secure payment sheet before finishing: back to review, nothing charged
+  | { type: "provider_abandon"; checkout_id: string; payment_session_id: string };
 
 export interface TurnInput {
   text?: string;

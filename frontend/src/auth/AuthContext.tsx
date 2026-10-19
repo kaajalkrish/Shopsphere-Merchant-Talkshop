@@ -23,7 +23,7 @@ interface AuthContextValue {
   isCustomer: boolean;
   login: (email: string, password: string) => Promise<AuthResult>;
   register: (name: string, email: string, password: string) => Promise<AuthResult>;
-  /** Part 2: new cardmember — name + email + last 4 must match the (simulated) Chase records. */
+  /** Optional: sign up AND link Chase benefits — name + email + last 4 must match the (simulated) Chase records. */
   registerCardmember: (fullName: string, email: string, password: string, last4: string) => Promise<AuthResult>;
   logout: () => Promise<void>;
 }

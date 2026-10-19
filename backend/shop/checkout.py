@@ -23,6 +23,9 @@ from backend.shop import offers
 from backend.shop.profile import address_dict, card_dict, list_addresses, list_cards
 
 EXPRESS_PRICE = 9.99
+# CH-6: paying with a new card on the payment provider's own page (no card number reaches ShopSphere)
+PROVIDER_VIEW = {"payment_method_id": "provider", "type": "provider",
+                 "display": "New card · Simulated Secure Payment Provider"}
 EXPRESS_DAYS = 2
 DELIVERY_LABELS = {"standard": "Standard", "express": "Express"}
 
@@ -78,8 +81,13 @@ def _recalculate(db: Session, co: Checkout) -> list[dict]:
                            "requested": ln["quantity"], "available": ln["stock"]})
     co.lines_json = json.dumps(lines)
     co.subtotal = round(sum(ln["line_total"] for ln in lines), 2)
-    # Member offer (Part 2): the server picks the one discount that saves the most.
-    offer, offer_discount = offers.best_discount(db, co.user_id, lines)
+    # Chase offer (Part 2; CH-3): the server picks the one discount that saves the most,
+    # and only when this order is paid with an eligible Chase credit card (decision Q5).
+    from backend.shop.entitlements import benefit_summary, payment_for_checkout
+    paying = payment_for_checkout(db, co)
+    offer, offer_discount = offers.best_discount(db, co.user_id, lines, paying)
+    # CH-4: record what the selected card gets, and which Chase benefits it would only get with a Chase card
+    co.benefits_json = json.dumps(benefit_summary(db, co.user_id, lines, paying))
     co.offer_id, co.offer_discount = (offer.offer_id if offer else None), offer_discount
     after_offer = round(co.subtotal - offer_discount, 2)
     # Loyalty points (Phase 12): 100 points = $1 off the products, before tax.
@@ -90,7 +98,10 @@ def _recalculate(db: Session, co: Checkout) -> list[dict]:
     co.total = round(after_offer - co.points_discount + co.tax + co.shipping, 2)
     std_days = max((ln.get("delivery_days") or 5) for ln in lines)
     co.delivery_date = datetime.combine(delivery_dates(std_days)[co.delivery_method], datetime.min.time())
-    co.checkout_hash = _hash(co, lines)
+    new_hash = _hash(co, lines)
+    if co.checkout_hash and new_hash != co.checkout_hash:
+        co.version = (co.version or 1) + 1                 # CH-4: anything that changes the charge = a new version
+    co.checkout_hash = new_hash
     return issues
 
 
@@ -149,7 +160,7 @@ def create_checkout(db: Session, user_id: str, line_ids: list[str],
         lines_json=json.dumps(lines), cart_item_ids=",".join(it.cart_item_id for it in items),
         address_id=addresses[0].address_id if addresses else None,
         payment_method_id=cards[0].payment_method_id if cards else None,
-        delivery_method="standard", currency="USD", pay_with="card",
+        delivery_method="standard", currency="USD", pay_with="card", version=1,
     )
     _recalculate(db, co)
     db.add(co)
@@ -186,8 +197,11 @@ def update_checkout(db: Session, user_id: str, checkout_id: str, *, delivery_met
         co.payment_method_id = payment_method_id
         co.pay_with = "card"
     if pay_with is not None:
-        if pay_with not in ("card", "wallet"):
-            raise CheckoutError("INVALID_PAYMENT", "Pay with a card or your ShopSphere Wallet.")
+        if pay_with not in ("card", "wallet", "provider"):
+            raise CheckoutError("INVALID_PAYMENT", "Pay with a saved card, a new card through the secure payment "
+                                                   "provider, or your ShopSphere Wallet.")
+        if pay_with == "provider" and is_guest_owner(db, user_id):
+            raise CheckoutError("LOGIN_REQUIRED", "Sign in to pay with a new card.", 403)
         if pay_with == "wallet" and (is_guest_owner(db, user_id)
                                      or not db.query(Wallet).filter_by(user_id=user_id).first()):
             raise CheckoutError("WALLET_UNAVAILABLE", "The ShopSphere Wallet is for customers with an account.", 403)
@@ -261,7 +275,7 @@ def set_guest_details(db: Session, user_id: str, checkout_id: str, *, full_name:
 
 def cancel_checkout(db: Session, user_id: str, checkout_id: str) -> Checkout:
     co = get_checkout(db, user_id, checkout_id)
-    if co.status in ("open", "consented"):
+    if co.status in ("open", "consented", "awaiting_payment"):   # (a pending provider session then can't complete)
         co.status = "cancelled"
         _invalidate_instructions(db, co)
         db.commit()
@@ -271,6 +285,42 @@ def cancel_checkout(db: Session, user_id: str, checkout_id: str) -> Checkout:
 def refresh(db: Session, co: Checkout) -> list[dict]:
     """Re-check prices and stock right before payment (no commit)."""
     return _recalculate(db, co)
+
+
+def invoice(db: Session, co: Checkout, lines: list[dict], path: dict, on_wallet: bool, wallet_view: Optional[dict],
+            card: Optional[PaymentMethod]) -> dict:
+    """The merchant's authoritative final invoice (CH-4): what "Approve & Pay" approves.
+    Every number is ShopSphere's; nothing here comes from the browser or the LLM."""
+    from backend.vic.common import MERCHANT_ID, MERCHANT_NAME
+    discounts = []
+    offer = db.query(offers.MemberOffer).filter_by(offer_id=co.offer_id).first() if co.offer_id else None
+    if offer and co.offer_discount:
+        discounts.append({"label": f"Chase card offer · {offer.title}", "amount": round(co.offer_discount, 2)})
+    if co.points_discount:
+        discounts.append({"label": f"{co.points_used:,} points", "amount": round(co.points_discount, 2)})
+    benefits = json.loads(co.benefits_json) if co.benefits_json else {"applied": [], "removed": []}
+    paying = (wallet_view or {}).get("display") if on_wallet else (card_dict(card) if card else None)
+    if co.pay_with == "provider":
+        paying = None
+    return {
+        "merchant_id": MERCHANT_ID, "merchant_name": MERCHANT_NAME, "order_ref": co.checkout_id,
+        "checkout_version": co.version or 1, "action": "PAY",
+        "items": [{"name": ln["name"], "sku": ln["sku"], "quantity": ln["quantity"], "unit_price": ln["unit_price"],
+                   "line_total": round(ln["unit_price"] * ln["quantity"], 2)} for ln in lines],
+        "subtotal": co.subtotal, "discounts": discounts,
+        "eligible_benefits": [b for b in benefits["applied"] if b["kind"] in ("bonus_points", "cashback")],
+        "tax": co.tax, "shipping": co.shipping, "final_amount": co.total, "currency": co.currency,
+        "payment": ({"type": "provider", "display": PROVIDER_VIEW["display"], "route": "provider_handoff",
+                     "page_owner": "Simulated Secure Payment Provider"} if co.pay_with == "provider" else
+                    {"type": "wallet", "display": paying} if on_wallet else
+                    {"type": "card", "display": paying.get("label") or paying["display"], "issuer": paying["issuer"],
+                     "network": paying["network"], "route": path.get("path")} if paying else None),
+    }
+
+
+def _hosted_url(session_id: str) -> str:
+    from backend.gateway.adapter import get_adapter
+    return get_adapter().hosted_url(session_id)
 
 
 def snapshot(db: Session, co: Checkout, issues: Optional[list[dict]] = None) -> dict:
@@ -285,6 +335,7 @@ def snapshot(db: Session, co: Checkout, issues: Optional[list[dict]] = None) -> 
     guest = is_guest_owner(db, co.user_id)
     wallet = None if guest else db.query(Wallet).filter_by(user_id=co.user_id).first()
     on_wallet = (co.pay_with == "wallet") and wallet is not None
+    on_provider = co.pay_with == "provider"
     problems = list(issues)
     if guest and not co.guest_email:
         problems.append({"code": "NO_GUEST_DETAILS", "message": "Add your name, email and shipping address."})
@@ -293,17 +344,25 @@ def snapshot(db: Session, co: Checkout, issues: Optional[list[dict]] = None) -> 
     if on_wallet:
         if wallet.balance < co.total:
             problems.append({"code": "INSUFFICIENT_WALLET", "message": "Your wallet balance doesn't cover this order."})
+        from backend.shop import eligibility      # CH-2: checkout is for credit-card holders, wallet too
+        if not eligibility.is_credit_card_holder(db, co.user_id):
+            problems.append({"code": "CREDIT_CARD_REQUIRED", "message": eligibility.MESSAGES["CREDIT_CARD_REQUIRED"]})
+    elif on_provider:
+        pass                                       # CH-6: the card is given on the payment provider's own page
     elif not card:
-        problems.append({"code": "NO_PAYMENT_METHOD", "message": "Add a payment card."})
+        problems.append({"code": "NO_PAYMENT_METHOD", "message": "Choose a saved credit card, or pay with a new card "
+                                                                 "through the secure payment provider."})
     wallet_view = ({"payment_method_id": "wallet", "type": "wallet", "display": "ShopSphere Wallet",
                     "balance": round(wallet.balance, 2), "enough": wallet.balance >= co.total} if wallet else None)
     std_days = max((ln.get("delivery_days") or 5) for ln in lines)
     dates = delivery_dates(std_days)
     offer = db.query(offers.MemberOffer).filter_by(offer_id=co.offer_id).first() if co.offer_id else None
-    bonus = [] if guest else offers.bonus_points(db, co.user_id, lines)
     from backend.shop import vic                       # which payment path this card takes (Part 2)
+    from backend.shop.entitlements import payment_for_checkout
     path = vic.payment_path(db, co)
-    cash = [] if guest or on_wallet else offers.cashback(db, co.user_id, lines, agent_pay=path["path"] == "vic")
+    paying = payment_for_checkout(db, co, path["path"])   # CH-3: Chase benefits follow the selected card
+    bonus = [] if guest else offers.bonus_points(db, co.user_id, lines, paying)
+    cash = [] if guest or on_wallet else offers.cashback(db, co.user_id, lines, paying)
     return {
         "checkout_id": co.checkout_id,
         "status": co.status,
@@ -321,8 +380,13 @@ def snapshot(db: Session, co: Checkout, issues: Optional[list[dict]] = None) -> 
             ],
         },
         "address": address_dict(address) if address else None,
-        "payment_method": wallet_view if on_wallet else (card_dict(card) if card else None),
-        "pay_with": "wallet" if on_wallet else "card",
+        "payment_method": (wallet_view if on_wallet else PROVIDER_VIEW if on_provider
+                           else (card_dict(card) if card else None)),
+        "pay_with": "wallet" if on_wallet else "provider" if on_provider else "card",
+        # CH-6: a new card through the Simulated Secure Payment Provider (customers only)
+        "provider_option": None if guest else {"available": True, "label": PROVIDER_VIEW["display"]},
+        "provider_session": ({"payment_session_id": co.provider_session_id, "status": co.status,
+                              "hosted_url": _hosted_url(co.provider_session_id)} if co.provider_session_id else None),
         "wallet": wallet_view,
         "guest": {"email": co.guest_email, "name": co.guest_name} if guest else None,
         "points_discount": co.points_discount or 0.0,
@@ -342,6 +406,11 @@ def snapshot(db: Session, co: Checkout, issues: Optional[list[dict]] = None) -> 
         "bonus_points": bonus,
         "cashback": cash,
         "payment_path": path,
+        # CH-4: the version the customer approves, the Chase benefits applied / removed (with reasons),
+        # and the authoritative invoice (everything the consent is scoped to)
+        "checkout_version": co.version or 1,
+        "benefits": json.loads(co.benefits_json) if co.benefits_json else {"applied": [], "removed": []},
+        "invoice": invoice(db, co, lines, path, on_wallet, wallet_view, None if on_provider else card),
         "saved_addresses": [] if guest else [address_dict(a) for a in list_addresses(db, co.user_id)],
         "saved_payment_methods": [] if guest else [card_dict(c) for c in list_cards(db, co.user_id)],
         "issues": problems,

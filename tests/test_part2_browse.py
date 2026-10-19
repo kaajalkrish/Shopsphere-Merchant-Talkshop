@@ -1,8 +1,8 @@
 """
-Browsing for everyone (Oct 11): guests and customers without an eligible card
-can browse the catalog and use Talkshop to find products. Adding to cart,
-checkout, offers, points and payment stay for eligible cardmembers — Talkshop
-asks them to sign in (or verify a card) and continues afterwards.
+Browsing for everyone. CH-2: visitors search, browse, use Talkshop and keep a
+cart; checkout needs a signed-in ShopSphere account (Talkshop asks them to sign in
+or sign up, then carries on). Any credit-card holder can buy; offers are a Chase
+credit-card benefit.
 """
 import json
 import uuid
@@ -48,7 +48,7 @@ def choose_flexrun(client, h, sid):
     return turn(client, h, sid, text="orange")
 
 
-def test_guest_finds_with_talkshop_but_must_sign_in_to_add(client):
+def test_guest_finds_and_adds_with_talkshop_but_must_sign_in_to_check_out(client):
     vis = client.post("/api/auth/visitor").json()
     h = {"Authorization": f"Bearer {vis['access_token']}"}
     sid = f"g-{uuid.uuid4().hex[:8]}"
@@ -58,10 +58,11 @@ def test_guest_finds_with_talkshop_but_must_sign_in_to_add(client):
     turn(client, h, sid, action={"type": "select", "product_id": "SSP002"})
     turn(client, h, sid, text="9")
     ev = turn(client, h, sid, text="orange")
-    assert of(ev, "login_required")[0]["reason"] == "sign_in" and not of(ev, "cart_updated")
-    assert "sign in as a Chase credit-card member" in of(ev, "message")[-1]["text"]
-    ev = turn(client, h, sid, action={"type": "checkout"})                  # can't sneak into checkout either
-    assert not of(ev, "checkout_ready") and not of(ev, "cart_updated")
+    assert of(ev, "cart_updated") and not of(ev, "login_required")         # the cart is open to everyone
+    ev = turn(client, h, sid, action={"type": "checkout"})                  # checkout needs an account
+    assert of(ev, "login_required")[0]["reason"] == "checkout" and not of(ev, "checkout_ready")
+    assert "sign in or create a ShopSphere account" in of(ev, "message")[-1]["text"]
+    assert "Chase" not in of(ev, "message")[-1]["text"]
 
 
 def test_after_signing_in_the_chosen_item_is_added(client):
@@ -76,12 +77,17 @@ def test_after_signing_in_the_chosen_item_is_added(client):
     client.delete(f"/api/cart/lines/{of(ev, 'cart_updated')[0]['added_line_id']}", headers=h)
 
 
-def test_signed_in_without_a_card_is_asked_to_verify(client):
+def test_signed_in_customer_without_chase_adds_and_checks_out(client):
+    """A checking-only Chase customer (no credit card) is not asked to verify
+    anything to shop: the cart and checkout review are open; paying needs a credit card."""
     h, _ = register_member(account_type="checking")
     sid = f"c-{uuid.uuid4().hex[:8]}"
     ev = choose_flexrun(client, h, sid)
-    assert of(ev, "login_required")[0]["reason"] == "not_eligible" and not of(ev, "cart_updated")
-    assert "Verify your card" in of(ev, "message")[-1]["text"]
+    assert of(ev, "cart_updated") and not of(ev, "login_required")
+    ev = turn(client, h, sid, action={"type": "checkout"})
+    need = of(ev, "checkout_details_needed")[0]["needs"]
+    assert need["payment"] and need["address"]                 # asks for the address first, then a credit card
+    assert "a credit card" in of(ev, "message")[-1]["text"]
 
 
 def test_members_still_add_straight_away(client):
@@ -91,10 +97,13 @@ def test_members_still_add_straight_away(client):
     assert of(ev, "cart_updated") and not of(ev, "login_required")
 
 
-def test_member_extras_only_for_members(client):
+def test_offers_only_for_chase_credit_card_holders(client):
     vis = client.post("/api/auth/visitor").json()
     guest = client.get("/api/products/SSP002", headers={"Authorization": f"Bearer {vis['access_token']}"}).json()
     assert guest["member"] is None and guest["price"] == 139.0
-    h, _ = register_member()
+    h, _ = register_member()                                                 # Chase Visa credit card
     member = client.get("/api/products/SSP002", headers=h).json()
     assert member["member"]["offers"][0]["offer_id"] == "OFF_RUN15"
+    ch, _ = register_member(issuer="Citi", network="Mastercard")              # Citi: points, no offers
+    citi = client.get("/api/products/SSP002", headers=ch).json()
+    assert citi["member"]["offers"] == [] and citi["member"]["points"] == 139

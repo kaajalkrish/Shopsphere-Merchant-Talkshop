@@ -4,6 +4,7 @@ import { ArrowRight, BadgePercent, Coins, Gift, Sparkles, Wallet } from "lucide-
 import { member as memberApi, type MemberInfo, type Offer, type Rewards } from "../../api/member";
 import { money } from "../../api/shop";
 import { Skeleton, cx } from "../../components/ui";
+import { useMember } from "../../member/MemberContext";
 
 /** The member's eligible card, drawn as an original ShopSphere card (no issuer or network artwork). */
 export function MemberCard({ info }: { info: MemberInfo }) {
@@ -49,19 +50,30 @@ const KIND = {
 
 const OFFER_LINKS: Record<string, string> = { shoes: "/c/shoes", clothing: "/c/women", electronics: "/c/electronics" };
 
-export function OfferCard({ offer, compact }: { offer: Offer; compact?: boolean }) {
+export function OfferCard({ offer, compact, onEnroll }: { offer: Offer; compact?: boolean; onEnroll?: (id: string) => void }) {
   const k = KIND[offer.kind];
   const to = offer.department ? OFFER_LINKS[offer.department] ?? "/" : "/";
   return (
-    <Link to={to} className="group rounded-2xl border border-line p-5 flex flex-col gap-3 hover:border-line-strong hover:shadow-card transition-shadow">
+    <Link to={to} className={cx("group rounded-2xl border border-line p-5 flex flex-col gap-3 hover:border-line-strong hover:shadow-card transition-shadow",
+      !offer.eligible && "opacity-90")}>
       <div className="flex items-center justify-between">
         <span className={cx("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold", k.tone)}>{k.icon}{k.label}</span>
         <span className="text-[10px] uppercase tracking-wider text-faint">{offer.label}</span>
       </div>
       <p className="text-lg font-semibold leading-snug">{offer.title}</p>
       {!compact && <p className="text-sm text-muted leading-relaxed">{offer.description}</p>}
+      {!offer.eligible && offer.reason_text && (
+        <div className="flex items-center justify-between gap-3 rounded-xl bg-panel px-3 py-2 text-xs">
+          <span className="text-ink-soft">{offer.reason_text}</span>
+          {offer.reason === "NOT_ENROLLED" && onEnroll && (
+            <button type="button" onClick={(e) => { e.preventDefault(); onEnroll(offer.offer_id); }}
+              className="shrink-0 rounded-full bg-btn text-btn-ink px-3 py-1 font-medium">Enroll</button>
+          )}
+        </div>
+      )}
       <div className="mt-auto flex items-center justify-between text-xs text-muted">
-        <span>{offer.audience === "visa_agent_pay" ? "Visa agent payments only" : "All cardmembers"}
+        <span>{offer.requires_payment_path === "vic" ? "Pay with your Chase Visa through agent payments"
+          : offer.pay_with_chase_card ? "Pay with your Chase credit card" : "Chase credit-card holders"}
           {offer.uses_left !== null ? ` · ${offer.uses_left} use${offer.uses_left === 1 ? "" : "s"} left` : ""}</span>
         <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
       </div>
@@ -70,18 +82,35 @@ export function OfferCard({ offer, compact }: { offer: Offer; compact?: boolean 
 }
 
 export function OffersPage() {
+  const { chase } = useMember();
   const [offers, setOffers] = useState<Offer[] | null>(null);
   useEffect(() => { memberApi.offers().then(setOffers).catch(() => setOffers([])); }, []);
+  if (!chase) return (
+    <div className="mx-auto max-w-[900px] px-4 sm:px-6 py-10">
+      <p className="text-xs font-semibold tracking-[0.2em] text-gold uppercase">Chase credit-card holders</p>
+      <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Offers are a Chase card benefit</h1>
+      <p className="text-muted mt-3 max-w-2xl leading-relaxed">
+        You can shop and check out on ShopSphere with any credit card, and you earn ShopSphere points on every order.
+        Offers are exclusive to Chase credit-card holders. Have a Chase credit card?
+      </p>
+      <Link to="/membership" className="mt-6 inline-flex items-center gap-2 h-11 px-5 rounded-full bg-btn text-btn-ink text-sm font-medium">
+        Link a Chase card <ArrowRight size={15} />
+      </Link>
+      <p className="mt-8 text-xs text-faint">Demo offers created for this concept. They are not real Chase or Visa benefits.</p>
+    </div>
+  );
   return (
     <div className="mx-auto max-w-[1200px] px-4 sm:px-6 py-10">
-      <p className="text-xs font-semibold tracking-[0.2em] text-gold uppercase">Exclusive to cardmembers</p>
-      <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Your offers</h1>
+      <p className="text-xs font-semibold tracking-[0.2em] text-gold uppercase">Exclusive to Chase credit-card holders</p>
+      <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Your Chase offers</h1>
       <p className="text-muted mt-2 max-w-2xl">
-        ShopSphere applies the offer that saves you the most at checkout, automatically. Bonus points add up; cashback
-        arrives as a simulated statement credit after an approved Visa agent payment.
+        When you pay with your Chase credit card, ShopSphere applies the offer that saves you the most, automatically,
+        and you earn 2× points. Bonus points add up; cashback arrives as a simulated statement credit after an approved
+        Visa agent payment. Paying with another card or the wallet means no Chase offer on that order.
       </p>
       <div className="grid sm:grid-cols-2 gap-4 mt-8">
-        {offers ? offers.map((o) => <OfferCard key={o.offer_id} offer={o} />)
+        {offers ? offers.map((o) => <OfferCard key={o.offer_id} offer={o}
+            onEnroll={(id) => memberApi.enroll(id).then(setOffers).catch(() => {})} />)
           : Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-44" />)}
       </div>
       <p className="mt-8 text-xs text-faint">Demo offers created for this concept. They are not real Chase or Visa benefits.</p>
@@ -91,7 +120,7 @@ export function OffersPage() {
 
 const LEDGER_LABEL: Record<string, string> = {
   earned: "Points earned", bonus: "Bonus points", redeemed: "Points redeemed", welcome: "Welcome bonus",
-  cashback: "Cashback credit (simulated)", discount: "Member discount",
+  cashback: "Cashback credit (simulated)", discount: "Chase offer discount",
 };
 
 export function RewardsPage() {
@@ -107,7 +136,7 @@ export function RewardsPage() {
             {[
               { icon: <Gift size={18} />, label: "Points balance", value: `${r.balance.toLocaleString()} pts`, sub: `worth ${money(r.value)} off products` },
               { icon: <Sparkles size={18} />, label: "Lifetime points", value: r.lifetime_points.toLocaleString(), sub: "earned and welcome bonus" },
-              { icon: <BadgePercent size={18} />, label: "Saved with member offers", value: money(r.offer_savings_total), sub: "discounts at checkout" },
+              { icon: <BadgePercent size={18} />, label: "Saved with Chase offers", value: money(r.offer_savings_total), sub: "discounts at checkout" },
               { icon: <Wallet size={18} />, label: "Cashback credits", value: money(r.cashback_total), sub: "simulated statement credits" },
             ].map((c) => (
               <div key={c.label} className="rounded-2xl border border-line p-5">
@@ -118,7 +147,7 @@ export function RewardsPage() {
               </div>
             ))}
           </div>
-          <p className="text-sm text-muted mt-4">{r.programme}. {r.redemption_rate}.</p>
+          <p className="text-sm text-muted mt-4">{r.programme}. Earn {r.earn_rate}. {r.redemption_rate}.</p>
           <h2 className="text-xl font-semibold mt-10 mb-3">Activity</h2>
           {r.ledger.length === 0 ? <p className="text-sm text-muted">No activity yet.</p> : (
             <div className="rounded-2xl border border-line divide-y divide-line">

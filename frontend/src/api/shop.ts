@@ -11,14 +11,17 @@ export interface Product {
   description: string; tags: string[]; price: number; currency: string; rating: number; review_count: number;
   is_new: boolean; delivery_days: number; option_label: string; image_url: string | null;
   colors: ColorOption[]; sizes: string[]; in_stock: boolean;
-  /** Cardmember extras computed by the server (Part 2): offers that apply and points at list price. */
+  /** Extras computed by the server for a signed-in customer: Chase offers that apply (Chase credit-card holders only) and points at list price. */
   member?: { offers: OfferBadge[]; points: number };
 }
-export interface OfferBadge { offer_id: string; kind: string; title: string; short: string }
+export interface OfferBadge { offer_id: string; kind: string; title: string; short: string; pay_with_chase_card?: boolean }
 /** Which payment path the server chose for this checkout (Part 2, D38). */
 export interface PaymentPath {
-  path: "vic" | "vic_setup_required" | "standard" | "wallet" | "none"; label?: string;
-  card?: { brand: string; last4: string }; card_account_id?: string; agent_token?: string;
+  path: "vic" | "vic_setup_required" | "standard" | "provider_handoff" | "wallet" | "none"; label?: string;
+  /** CH-5: generic route name (saved_card = the older "standard"). */
+  route?: "vic" | "vic_setup_required" | "saved_card" | "provider_handoff" | "wallet" | "none";
+  network?: string; page_owner?: string;
+  card?: { brand: string; last4: string; issuer?: string; network?: string; display?: string }; card_account_id?: string; agent_token?: string;
   agent_token_status?: string; issuer?: string;
 }
 export interface Variant { sku: string; size: string | null; color: string; color_hex: string; stock: number; in_stock: boolean; image_url: string | null }
@@ -39,12 +42,23 @@ export interface Address {
   address_id: string; label: string; full_name: string; line1: string; line2: string | null; city: string;
   state: string; postal_code: string; country: string; is_default: boolean; display: string;
 }
+/** Card network and issuer are separate (CH-1): a credit card isn't automatically Visa, and a
+ *  Chase card isn't automatically Visa. Codes are upper case; "UNKNOWN" when not known. */
+export type CardNetwork = "VISA" | "MASTERCARD" | "AMEX" | "DISCOVER" | "UNKNOWN";
+export type CardIssuer = "CHASE" | "CITI" | "BOFA" | "AMEX" | "CAPITAL_ONE" | "DISCOVER" | "UNKNOWN";
 export interface Card {
   payment_method_id: string; brand: string; last4: string; exp_month: number; exp_year: number;
   cardholder_name: string; is_default: boolean; display: string; saved?: boolean;
+  issuer: CardIssuer; issuer_display: string | null; network: CardNetwork; network_display: string;
+  status: string; source: "seeded" | "issuer_link" | "manual_legacy" | "provider_token" | null;
+  eligible_for_standard_checkout: boolean;
+  /** "Chase Visa •••• 1234", "Citi Mastercard •••• 5678" (CH-5) */
+  label?: string;
 }
 /** The ShopSphere Wallet shown as a way to pay (customers only, Phase 10). */
 export interface WalletOption { payment_method_id: "wallet"; type: "wallet"; display: string; balance: number; enough: boolean }
+/** CH-6: a new card through the Simulated Secure Payment Provider. */
+export interface ProviderOption { payment_method_id: "provider"; type: "provider"; display: string }
 export interface CheckoutLine {
   line_id: string; sku: string; product_id: string; name: string; brand: string; size: string | null; color: string;
   option_label: string; quantity: number; unit_price: number; line_total: number; image_url: string | null; in_stock: boolean;
@@ -52,11 +66,14 @@ export interface CheckoutLine {
 export interface DeliveryOption { method: "standard" | "express"; label: string; price: number; date: string }
 export interface CheckoutIssue { code: string; message?: string; name?: string; available?: number }
 export interface Checkout {
-  checkout_id: string; status: "open" | "consented" | "paid" | "cancelled"; lines: CheckoutLine[]; item_count: number;
+  checkout_id: string; status: "open" | "consented" | "awaiting_payment" | "paid" | "cancelled"; lines: CheckoutLine[]; item_count: number;
   subtotal: number; tax: number; tax_rate: number; shipping: number; total: number; currency: string;
   delivery: { method: "standard" | "express"; date: string; options: DeliveryOption[] };
-  address: Address | null; payment_method: (Card | WalletOption) | null; saved_addresses: Address[]; saved_payment_methods: Card[];
-  pay_with: "card" | "wallet"; wallet: WalletOption | null;
+  address: Address | null; payment_method: (Card | WalletOption | ProviderOption) | null; saved_addresses: Address[]; saved_payment_methods: Card[];
+  pay_with: "card" | "wallet" | "provider"; wallet: WalletOption | null;
+  /** CH-6: paying with a new card on the Simulated Secure Payment Provider's page */
+  provider_option?: { available: boolean; label: string } | null;
+  provider_session?: { payment_session_id: string; status: string; hosted_url: string } | null;
   /** Loyalty points (customers only; null for guests). 100 points = $1 off before tax. */
   points: { balance: number; used: number; discount: number; max_usable: number; value_per_point: number } | null;
   points_discount: number;
@@ -65,12 +82,30 @@ export interface Checkout {
   /** Guest checkout (no account): the email and name once given. */
   guest: { email: string | null; name: string | null } | null;
   issues: CheckoutIssue[]; ready: boolean; checkout_hash: string;
-  /** Part 2: member offer (one discount, server-chosen), bonus points, simulated cashback, payment path */
+  /** Chase card offer (one discount, server-chosen; CH-3: only when paying with an eligible Chase card), bonus points incl. 2× with a Chase card, simulated cashback, payment path */
   offer?: { offer_id: string; title: string; kind: string; discount: number } | null;
   offer_discount?: number; base_points?: number;
   bonus_points?: { offer_id: string; title: string; points: number }[];
   cashback?: { offer_id: string; title: string; amount: number }[];
   payment_path?: PaymentPath;
+  /** CH-4: the version "Approve & Pay" approves; it changes whenever anything that affects the charge changes. */
+  checkout_version: number;
+  /** CH-4: Chase benefits on this order with the selected card, and those it would only get with a Chase card. */
+  benefits: { applied: Benefit[]; removed: (Benefit & { reason: string; reason_text: string | null })[] };
+  /** CH-4: the merchant's authoritative final invoice (what the consent is scoped to). */
+  invoice: Invoice;
+}
+export interface Benefit { offer_id: string; title: string; kind: string; amount: number; points: number }
+export interface Invoice {
+  merchant_id: string; merchant_name: string; order_ref: string; checkout_version: number; action: "PAY";
+  items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number }[];
+  subtotal: number; discounts: { label: string; amount: number }[]; eligible_benefits: Benefit[];
+  tax: number; shipping: number; final_amount: number; currency: string;
+  payment: { type: "card" | "wallet"; display: string; issuer?: string; network?: string; route?: string } | null;
+}
+/** CH-4 consent scope sent with "Approve & Pay": exactly what the customer saw. */
+export function consentScope(co: Pick<Checkout, "checkout_version" | "total" | "currency">) {
+  return { action: "PAY" as const, checkout_version: co.checkout_version, final_amount: co.total, currency: co.currency };
 }
 export interface ShipmentStep { key: string; label: string; done: boolean; at: string | null }
 export interface Shipment {
@@ -102,12 +137,18 @@ export interface Order {
   payment_path?: "vic" | "standard" | "wallet" | null;
 }
 export type ConfirmResult =
-  | { status: "authorized"; order: Order; transaction_id: string; confirmation_email?: string | null; trace?: TraceEntry[] }
-  | { status: "declined" | "blocked" | "order_failed"; reason: string; message: string; checkout: Checkout; trace?: TraceEntry[] };
+  | { status: "authorized"; order: Order; transaction_id: string; confirmation_email?: string | null; trace?: TraceEntry[];
+      saved_payment_method?: Card | null; duplicate?: boolean }
+  /** CH-6: approved; the customer now gives the card on the provider's own page */
+  | { status: "provider_handoff"; payment_session_id: string; hosted_url: string; expires_at: string; checkout: Checkout; trace?: TraceEntry[] }
+  | { status: "pending"; payment_session_id: string; hosted_url: string; message: string }
+  | { status: "declined" | "blocked" | "order_failed" | "cancelled"; reason: string; message: string; checkout: Checkout; trace?: TraceEntry[] };
 /** One backend step of a payment, as it ran (safe: shortened refs, no card data). */
 export interface TraceEntry {
   agent: string; check: string; result: "pass" | "blocked" | "info"; detail?: string | null; protocol?: string;
   layer?: "local" | "simulated";
+  /** Named step of the secure-payment flow, e.g. CARD_TOKENIZED, USER_VERIFIED, PAYMENT_AUTHORIZED. */
+  event?: string;
 }
 
 export class ShopError extends Error {
@@ -161,20 +202,27 @@ export const shop = {
   deleteAddress: (id: string) => call<{ deleted: string }>(`/api/me/addresses/${id}`, json("DELETE")),
   cards: () => call<Card[]>("/api/me/payment-methods"),
   deleteCard: (id: string) => call<{ deleted: string }>(`/api/me/payment-methods/${id}`, json("DELETE")),
-  /** Tokenize a card. save: false = this order only (guests are always one-time). */
-  addCard: (c: { number: string; exp_month: number; exp_year: number; cvc: string; cardholder_name: string; make_default?: boolean; save?: boolean }) =>
-    call<Card>("/api/me/payment-methods", json("POST", c)),
 
   createCheckout: (lineIds: string[], guest = false) => call<Checkout>("/api/checkouts", json("POST", { line_ids: lineIds, guest })),
   guestDetails: (id: string, details: GuestDetails) => call<Checkout>(`/api/checkouts/${id}/guest-details`, json("POST", details)),
   checkout: (id: string) => call<Checkout>(`/api/checkouts/${id}`),
-  updateCheckout: (id: string, changes: { delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet"; points_used?: number; quantities?: Record<string, number> }) =>
+  updateCheckout: (id: string, changes: { delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number> }) =>
     call<Checkout>(`/api/checkouts/${id}`, json("PATCH", changes)),
   loyalty: () => call<{ balance: number; lifetime_points: number }>("/api/loyalty"),
   cancelCheckout: (id: string) => call<Checkout>(`/api/checkouts/${id}/cancel`, json("POST")),
-  /** Visa agent-payment path: pass the member's AUTHENTICATED instruction (simulated passkey). */
-  confirm: (id: string, instructionId?: string) =>
-    call<ConfirmResult>(`/api/checkouts/${id}/confirm`, json("POST", { consent: true, instruction_id: instructionId })),
+  /** Approve & Pay (CH-4): scoped to the invoice the customer saw. Visa agent-payment path: also the
+   *  member's AUTHENTICATED instruction (simulated passkey). A changed order → 409 STALE_CHECKOUT, nothing charged. */
+  confirm: (co: Pick<Checkout, "checkout_id" | "checkout_version" | "total" | "currency">, instructionId?: string) =>
+    call<ConfirmResult>(`/api/checkouts/${co.checkout_id}/confirm`,
+      json("POST", { consent: true, instruction_id: instructionId, ...consentScope(co),
+        return_url: `${window.location.origin}/checkout/${co.checkout_id}` })),
+  /** CH-6: back from the payment provider's page — ShopSphere checks the result with the provider itself. */
+  completeProvider: (checkoutId: string, sessionId: string) =>
+    call<ConfirmResult>(`/api/checkouts/${checkoutId}/payment-session/${encodeURIComponent(sessionId)}/complete`, json("POST", {})),
+  /** The customer closed the secure payment page: release the provider session, back to review. Nothing charged. */
+  abandonProvider: (checkoutId: string, sessionId: string) =>
+    call<{ status: "cancelled" | "noop"; checkout: Checkout }>(
+      `/api/checkouts/${checkoutId}/payment-session/${encodeURIComponent(sessionId)}/abandon`, json("POST", {})),
 
   orders: () => call<(Record<string, unknown> & { display_id?: string })[]>("/api/orders"),
   order: (id: string) => call<Record<string, unknown> & Partial<Order> & { display_id?: string; amount?: number }>(`/api/orders/${id}`),

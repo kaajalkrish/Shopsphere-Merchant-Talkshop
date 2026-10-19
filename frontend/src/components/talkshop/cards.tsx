@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Link, useLocation } from "react-router-dom";
 import { ArrowUpRight, Bot, Check, CheckCircle2, CreditCard, Fingerprint, Loader2, Lock, MapPin, ShieldCheck, ShoppingBag, Truck, UserRound, XCircle } from "lucide-react";
 import type { OptionChoice, TalkAction, TalkEvent } from "../../api/talkshop";
-import { money, niceDate, type Cart, type Checkout, type Order, type Product, type TrackedOrder } from "../../api/shop";
+import { money, niceDate, type Card, type Cart, type Checkout, type Order, type Product, type TrackedOrder } from "../../api/shop";
 import { ShipmentProgress } from "../shopsphere/ShipmentProgress";
 import { AddressForm, CardForm, GuestDetailsForm } from "../shopsphere/CheckoutForms";
 import { Button, Field, Notice, Rating, Stepper, cx } from "../ui";
@@ -144,13 +144,16 @@ export const AUTO_CHECKOUT_SECONDS = 6;
 
 /** After an item is added: move to checkout automatically in 6 seconds unless
  *  the shopper taps Keep shopping. Checkout only opens the review card; paying
- *  still needs GO AHEAD. Pauses if the shopper starts typing to Talkshop. */
+ *  still needs GO AHEAD. The shopper can pause and resume it; it also pauses
+ *  if they start typing to Talkshop. */
 export function CheckoutCountdown({ onPick }: { onPick: (c: { value: string; label: string }) => void }) {
   const [left, setLeft] = useState(AUTO_CHECKOUT_SECONDS);
   const [paused, setPaused] = useState(false);
   const fired = useRef(false);
-  const [draining, setDraining] = useState(false);       // the bar empties smoothly over the whole countdown
+  const [draining, setDraining] = useState(false);       // the bar empties smoothly, one second at a time
   useEffect(() => { const f = requestAnimationFrame(() => setDraining(true)); return () => cancelAnimationFrame(f); }, []);
+  // A pause holds the current second; resuming counts it again from the start.
+  const barWidth = `${(Math.max(0, draining && !paused ? left - 1 : left) / AUTO_CHECKOUT_SECONDS) * 100}%`;
   const pick = (c: { value: string; label: string }) => {
     if (fired.current) return;
     fired.current = true;
@@ -176,20 +179,21 @@ export function CheckoutCountdown({ onPick }: { onPick: (c: { value: string; lab
   return (
     <div className="rounded-2xl border border-talk/40 bg-talk-soft/40 p-3.5 flex flex-col gap-2.5">
       <p className="sr-only" role="status">
-        {paused ? "Automatic checkout paused." : `Moving to checkout in ${AUTO_CHECKOUT_SECONDS} seconds. Tap Keep shopping to stay.`}
+        {paused ? `Automatic checkout paused with ${left} seconds left.` : `Moving to checkout shortly. Tap Pause or Keep shopping to stay.`}
       </p>
-      <p aria-hidden="true" className="text-sm font-medium tabular-nums">{paused ? "Auto-checkout paused" : `Moving to checkout in ${left}s`}</p>
-      {!paused && (
-        <div aria-hidden="true" className="h-1 rounded-full bg-line overflow-hidden">
-          <div className="h-full bg-talk transition-[width] ease-linear motion-reduce:transition-none"
-            style={{ width: draining ? "0%" : "100%", transitionDuration: `${AUTO_CHECKOUT_SECONDS}s` }} />
-        </div>
-      )}
+      <p aria-hidden="true" className="text-sm font-medium tabular-nums">{paused ? `Auto-checkout paused · ${left}s left` : `Moving to checkout in ${left}s`}</p>
+      <div aria-hidden="true" className="h-1 rounded-full bg-line overflow-hidden">
+        <div className={`h-full ${paused ? "bg-muted" : "bg-talk"} ease-linear motion-reduce:transition-none ${paused ? "" : "transition-[width] duration-1000"}`}
+          style={{ width: barWidth }} />
+      </div>
       <p className="text-xs text-muted leading-snug">
-        {paused ? "Check out whenever you're ready." : "Want to keep shopping? Tap Keep shopping."} Nothing is charged until you approve the order.
+        {paused ? "Resume when you're ready, or check out now." : "Need a moment? Tap Pause."} Nothing is charged until you approve the order.
       </p>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="talk" onClick={() => pick({ value: "checkout", label: "Checkout now" })}>Checkout now</Button>
+        <Button size="sm" variant="secondary" aria-pressed={paused} onClick={() => setPaused((p) => !p)}>
+          {paused ? "Resume" : "Pause"}
+        </Button>
         <Button size="sm" variant="secondary" onClick={() => pick({ value: "keep_shopping", label: "Keep shopping" })}>Keep shopping</Button>
       </div>
     </div>
@@ -233,7 +237,9 @@ function PathNote({ co }: { co: Checkout }) {
   if (p === "vic_setup_required") return <p className="text-[11px] rounded-lg bg-gold-soft text-gold px-2.5 py-1.5 leading-snug">
     Set up Visa agent payments first (simulated passkey), or choose another card.</p>;
   if (p === "standard") return <p className="text-[11px] rounded-lg bg-panel text-muted px-2.5 py-1.5 leading-snug">
-    Standard card payment through ShopSphere's gateway (no Visa agent token).</p>;
+    Saved card payment through ShopSphere's gateway on the {co.payment_path?.network ?? "card"} network (no Visa agent token).</p>;
+  if (p === "provider_handoff") return <p className="text-[11px] rounded-lg bg-panel text-muted px-2.5 py-1.5 leading-snug">
+    New card: after you approve, the Simulated Secure Payment Provider's own page takes it. Talkshop never sees the card number.</p>;
   return null;
 }
 
@@ -274,12 +280,19 @@ export function ReviewOrderCard({ checkout: co, active, busy, onAct }:
 
         <div className="border-t border-line pt-3 flex flex-col gap-1 text-sm">
           <Row label="Product" value={money(co.subtotal)} />
-          {co.offer && <Row label={`Member offer · ${co.offer.title}`} value={`−${money(co.offer.discount)}`} />}
+          {co.offer && <Row label={`Chase card offer · ${co.offer.title}`} value={`−${money(co.offer.discount)}`} />}
           {co.points_discount > 0 && <Row label={`Points (${co.points?.used.toLocaleString()})`} value={`−${money(co.points_discount)}`} />}
           <Row label={`Tax`} value={money(co.tax)} />
           {co.shipping > 0 && <Row label="Express delivery" value={money(co.shipping)} />}
           <div className="flex justify-between font-semibold text-[15px] pt-1.5 border-t border-line mt-1"><span>Total</span><span className="tabular-nums">{money(co.total)}</span></div>
+          <p className="text-[11px] text-faint">Invoice {co.checkout_id} · version {co.checkout_version} · {co.currency}</p>
         </div>
+        {(co.benefits?.removed ?? []).length > 0 && (
+          <div className="rounded-xl border border-gold/40 bg-gold-soft/40 px-3 py-2 text-xs flex flex-col gap-0.5">
+            <p className="font-semibold">Chase benefits not applied</p>
+            {co.benefits.removed.map((b) => <p key={b.offer_id} className="text-ink-soft">{b.title}: {b.reason_text}</p>)}
+          </div>
+        )}
 
         <PointsLine co={co} live={live} busy={busy} onUse={(n) => update({ points_used: n })} />
 
@@ -312,33 +325,40 @@ export function ReviewOrderCard({ checkout: co, active, busy, onAct }:
             onSaved={(a) => { setAdding(null); update({ address_id: a.address_id }); }} /></div>
         )}
 
-        <Detail icon={<CreditCard size={13} />} label="Payment" value={co.payment_method?.display}
-          canChange={live && (co.saved_payment_methods.length > 0 || !!co.wallet)} onChange={() => { setChanging(changing === "card" ? null : "card"); setAdding(null); }} />
+        <Detail icon={<CreditCard size={13} />} label="Payment" value={(co.payment_method as Card | null)?.label ?? co.payment_method?.display}
+          canChange={live && (co.saved_payment_methods.length > 0 || !!co.wallet || !!co.provider_option)} onChange={() => { setChanging(changing === "card" ? null : "card"); setAdding(null); }} />
         {co.payment_method && <PathNote co={co} />}
         {live && changing === "card" && (
           <Choices items={[
-              ...(co.wallet ? [{ id: "wallet", label: `ShopSphere Wallet · ${money(co.wallet.balance)}`, on: co.pay_with === "wallet" }] : []),
-              ...co.saved_payment_methods.map((c) => ({ id: c.payment_method_id, label: c.display,
-                on: co.pay_with !== "wallet" && c.payment_method_id === co.payment_method?.payment_method_id })),
+              ...(co.wallet ? [{ id: "wallet", label: `ShopSphere Wallet · ${money(co.wallet.balance)}`
+                + (co.saved_payment_methods.length ? "" : " (needs a saved credit card)"), on: co.pay_with === "wallet" }] : []),
+              ...co.saved_payment_methods.map((c) => ({ id: c.payment_method_id, label: c.label ?? c.display,
+                on: co.pay_with === "card" && c.payment_method_id === co.payment_method?.payment_method_id })),
+              ...(co.provider_option ? [{ id: "provider", label: "New card · secure payment provider", on: co.pay_with === "provider" }] : []),
             ]}
-            onPick={(id) => { update(id === "wallet" ? { pay_with: "wallet" } : { payment_method_id: id }); setChanging(null); }}
+            onPick={(id) => { update(id === "wallet" ? { pay_with: "wallet" } : id === "provider" ? { pay_with: "provider" }
+              : { payment_method_id: id }); setChanging(null); }}
             onAdd={() => { setAdding("card"); setChanging(null); }} addLabel="+ New card" />
         )}
         {live && (adding === "card" || needsCard) && (
           <div className="rounded-xl border border-line p-3"><CardForm allowSave={!co.guest} onCancel={needsCard ? undefined : () => setAdding(null)}
-            onSaved={(c) => { setAdding(null); update({ payment_method_id: c.payment_method_id }); }} /></div>
+            onUseProvider={co.provider_option ? () => { setAdding(null); update({ pay_with: "provider" }); } : undefined} /></div>
         )}
 
         {co.issues.filter((i) => i.code === "OUT_OF_STOCK").map((i) => (
           <p key={i.name} className="text-xs text-bad">{i.name}: only {i.available} left.</p>
         ))}
+        {live && !co.ready && <BlockedReasons co={co} busy={busy} onNewCard={() => update({ pay_with: "provider" })} />}
 
         {live && (
           <>
             <Button size="lg" variant="talk" className="w-full tracking-wide" disabled={!co.ready || busy}
-              onClick={() => onAct({ type: "go_ahead", checkout_id: co.checkout_id, label: "Approve and pay" })}>
-              {co.payment_path?.path === "vic" ? <Fingerprint size={16} /> : <Lock size={15} />}
-              {co.payment_path?.path === "vic_setup_required" ? "Set up agent payments" : `Approve and pay · ${money(co.total)}`}
+              onClick={() => onAct({ type: "go_ahead", checkout_id: co.checkout_id, label: "Approve and pay",
+                checkout_version: co.checkout_version, final_amount: co.total, currency: co.currency,
+                return_url: `${window.location.origin}${window.location.pathname}` })}>
+              {co.payment_path?.path === "vic" ? <Fingerprint size={16} /> : co.pay_with === "provider" ? <ShieldCheck size={16} /> : <Lock size={15} />}
+              {co.payment_path?.path === "vic_setup_required" ? "Set up agent payments"
+                : co.pay_with === "provider" ? `Continue to Secure Payment · ${money(co.total)}` : `Approve & Pay ${money(co.total)}`}
             </Button>
             <button type="button" disabled={busy} onClick={() => onAct({ type: "cancel_checkout", label: "Cancel order" })}
               className="text-xs text-muted hover:text-ink -mt-1">Cancel</button>
@@ -384,6 +404,16 @@ function Choices({ items, onPick, onAdd, addLabel }: { items: { id: string; labe
 /* ── Payment status ────────────────────────────────────────────────────── */
 const STEPS = ["processing", "authorizing", "authorized"] as const;
 export function PaymentStatusCard({ state, payment, message }: { state: string; payment: string | null; message?: string }) {
+  if (state === "handoff") return (
+    <Shell className="p-4"><p className="text-xs text-muted">Payment: <span className="text-ink font-medium">{payment ?? "—"}</span></p>
+      <p className="text-sm mt-2 flex items-center gap-2"><ShieldCheck size={16} className="text-talk" /> Approved · waiting for the secure payment provider</p>
+    </Shell>
+  );
+  if (state === "cancelled") return (
+    <Shell className="p-4"><p className="text-sm flex items-center gap-2"><XCircle size={16} className="text-muted" /> {message ?? "Payment cancelled"}</p>
+      <p className="text-xs text-muted mt-1">Nothing was authorized or charged.</p>
+    </Shell>
+  );
   const failed = state === "declined" || state === "failed";
   const reached = failed ? 1 : STEPS.indexOf(state as (typeof STEPS)[number]);
   const labels = ["Processing your order", "Authorizing payment", "Payment authorized"];
@@ -429,7 +459,7 @@ export function OrderConfirmedCard({ order, email }: { order: Order; email?: str
           </div>
         ))}
         <div className="flex flex-col gap-1 border-t border-line pt-3">
-          {order.offer && <Row label={`Member offer · ${order.offer.title}`} value={`−${money(order.offer.discount)}`} />}
+          {order.offer && <Row label={`Chase card offer · ${order.offer.title}`} value={`−${money(order.offer.discount)}`} />}
           {!!order.points?.used && <Row label={`Points used (${order.points.used.toLocaleString()})`} value={`−${money(order.points.discount)}`} />}
           <Row label="Total" value={money(order.total)} />
           <Row label="Paid with" value={`${order.payment?.display ?? "—"}${order.payment_path === "vic" ? " · Visa agent payment" : ""}`} />
@@ -479,7 +509,7 @@ export function SecureDetailsCard({ checkoutId, needs, guest, wallet, active, on
         {(needs.address || needs.guest) && needs.payment && <span className="text-[11px] text-muted shrink-0">Step 1 of 2</span>}
       </div>
       <div className="p-4 flex flex-col gap-3">
-        <p className="text-sm font-medium">{step === "guest" ? "Your details" : step === "address" ? "Shipping address" : "Add a card"}</p>
+        <p className="text-sm font-medium">{step === "guest" ? "Your details" : step === "address" ? "Shipping address" : "A credit card is needed"}</p>
         {step === "guest" && (
           <p className="text-xs text-muted -mt-2">Checking out as a guest: no account is created. Your confirmation goes to this email.</p>
         )}
@@ -489,7 +519,8 @@ export function SecureDetailsCard({ checkoutId, needs, guest, wallet, active, on
           : step === "address"
           ? <AddressForm defaultName={user?.name}
               onSaved={(a) => onAct({ type: "details_added", address_id: a.address_id, label: "Shipping address added" })} />
-          : <CardForm allowSave={!guest} onSaved={(c) => onAct({ type: "details_added", payment_method_id: c.payment_method_id, label: `Card added · ${c.display}` })} />}
+          : <CardForm allowSave={!guest} onUseProvider={guest ? undefined
+              : () => onAct({ type: "details_added", pay_with: "provider", label: "Pay with a new card (secure payment provider)" })} />}
         {step === "payment" && wallet && (
           <button type="button" disabled={!wallet.enough}
             onClick={() => onAct({ type: "details_added", pay_with: "wallet", label: "Pay with ShopSphere Wallet" })}
@@ -501,7 +532,7 @@ export function SecureDetailsCard({ checkoutId, needs, guest, wallet, active, on
           <ShieldCheck size={13} className="shrink-0" />
           {step !== "payment"
             ? "This information is sent directly to ShopSphere checkout and is not processed as chat content."
-            : "Card details go directly to ShopSphere's payment partner and are replaced with a secure token. Talkshop only sees the card type and last 4 digits."}
+            : "Talkshop never sees card numbers. It only ever sees a card's type and last 4 digits."}
         </p>
         <button type="button" onClick={() => onAct({ type: "cancel_checkout", label: "Not now" })}
           className="text-xs text-muted hover:text-ink">Not now</button>
@@ -510,48 +541,66 @@ export function SecureDetailsCard({ checkoutId, needs, guest, wallet, active, on
   );
 }
 
-/** Shown when a non-member tries to buy. Browsing and Talkshop are open to
- *  everyone; adding to cart and checkout need an eligible cardmember. Signing
- *  in keeps this conversation, and Talkshop adds the chosen item afterwards. */
-export function SignInCard({ active, reason }: { active: boolean; reason?: string }) {
-  const { isCustomer, user } = useAuth();
+/** Shown when a visitor wants to check out (CH-2/CH-7). Searching, browsing and the cart
+ *  are open to everyone; checkout needs a ShopSphere account (any credit-card holder —
+ *  Chase status doesn't matter). New shoppers can create the account right here: the
+ *  form posts straight to ShopSphere's sign-up (never into the chat), the cart and this
+ *  conversation come along, and Talkshop carries on to checkout. No card is asked for. */
+export function SignInCard({ active }: { active: boolean; reason?: string }) {
+  const { register } = useAuth();
   const location = useLocation();
   const next = encodeURIComponent(location.pathname + location.search);
-  const resume = () => { try { sessionStorage.setItem(RESUME_KEY, "add_to_cart"); } catch { /* private mode */ } };
+  const resume = () => { try { sessionStorage.setItem(RESUME_KEY, "checkout"); } catch { /* private mode */ } };
+  const [mode, setMode] = useState<"choose" | "signup">("choose");
+  const [f, setF] = useState({ name: "", email: "", password: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   if (!active) return null;
-  if (reason === "not_eligible" && isCustomer) {
-    return (
-      <Shell className="border-talk/50 shadow-card p-4 flex flex-col gap-2.5">
-        <p className="flex items-center gap-2 text-sm font-semibold"><UserRound size={15} className="text-talk" /> Verify a Chase credit card</p>
-        <p className="text-xs text-muted leading-snug">
-          Signed in as {user?.name}. Buying is for Chase credit-card members: verify your card with its last four
-          digits (your account name and email must match your Chase account).
-        </p>
-        <Link to="/membership" onClick={resume}
-          className="inline-flex items-center justify-center h-10 rounded-full bg-talk text-white text-sm font-medium hover:opacity-90">
-          Verify my card
-        </Link>
-      </Shell>
-    );
-  }
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setError(null);
+    resume();                                     // after the account exists, Talkshop goes on to checkout
+    try { await register(f.name, f.email, f.password); }
+    catch (err) {
+      try { sessionStorage.removeItem(RESUME_KEY); } catch { /* private mode */ }
+      setError((err as Error).message);
+    } finally { setBusy(false); setF((x) => ({ ...x, password: "" })); }
+  };
   return (
     <Shell className="border-talk/50 shadow-card">
       <div className="px-4 py-3 bg-panel flex items-center gap-2">
-        <UserRound size={15} className="text-talk" /><p className="text-xs font-bold tracking-[0.16em]">SIGN IN TO BUY</p>
+        <UserRound size={15} className="text-talk" /><p className="text-xs font-bold tracking-[0.16em]">SIGN IN TO CHECK OUT</p>
       </div>
       <div className="p-4 flex flex-col gap-2.5">
         <p className="text-xs text-muted leading-snug">
-          ShopSphere checkout is for Chase credit-card members. Sign in, or create an account with the name, email and
-          last four digits on your Chase card. This conversation comes with you.
+          ShopSphere checkout is for credit-card holders with a ShopSphere account. Your cart and this conversation
+          come with you.
         </p>
-        <Link to={`/login?next=${next}`} onClick={resume}
-          className="inline-flex items-center justify-center h-10 rounded-full bg-talk text-white text-sm font-medium hover:opacity-90">
-          Sign in as a cardmember
-        </Link>
-        <Link to={`/login?signup=1&next=${next}`} onClick={resume}
-          className="inline-flex items-center justify-center h-10 rounded-full border border-line-strong text-sm font-medium hover:border-ink">
-          New customer? Create an account
-        </Link>
+        {mode === "signup" ? (
+          <form onSubmit={submit} className="flex flex-col gap-2.5">
+            <Field label="Full name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required autoComplete="name" />
+            <Field label="Email" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} required autoComplete="email" />
+            <Field label="Create a password (min 8 characters)" type="password" value={f.password} minLength={8} required
+              onChange={(e) => setF({ ...f, password: e.target.value })} autoComplete="new-password" />
+            {error && <Notice>{error}</Notice>}
+            <Button type="submit" loading={busy}>Create account and continue</Button>
+            <p className="flex items-start gap-1.5 text-[11px] text-muted leading-snug"><Lock size={12} className="shrink-0 mt-0.5" />
+              Sent straight to ShopSphere's sign-up, not into the chat. No card details: you'll give a card on the secure
+              payment provider's page at checkout.</p>
+            <button type="button" onClick={() => setMode("choose")} className="text-xs text-muted hover:text-ink">Back</button>
+          </form>
+        ) : (
+          <>
+            <Link to={`/login?next=${next}`} onClick={resume}
+              className="inline-flex items-center justify-center h-10 rounded-full bg-talk text-white text-sm font-medium hover:opacity-90">
+              Sign in
+            </Link>
+            <button type="button" onClick={() => setMode("signup")}
+              className="inline-flex items-center justify-center h-10 rounded-full border border-line-strong text-sm font-medium hover:border-ink">
+              New to ShopSphere? Create an account here
+            </button>
+          </>
+        )}
       </div>
     </Shell>
   );
@@ -646,6 +695,49 @@ export function ApprovalCard({ amount, payment, active, autoStart, onApprove }:
 }
 
 /** Persona E: set up Visa agent payments (simulated agent token + passkey) before paying. */
+/** Why Approve & Pay is disabled, in plain words, with a way forward. */
+export function BlockedReasons({ co, busy, onNewCard }: { co: Checkout; busy: boolean; onNewCard: () => void }) {
+  const reasons = co.issues.filter((i) => i.code !== "OUT_OF_STOCK" && i.message);
+  if (!reasons.length) return null;
+  const needsCard = co.issues.some((i) => i.code === "CREDIT_CARD_REQUIRED" || i.code === "NO_PAYMENT_METHOD");
+  return (
+    <div className="rounded-xl border border-gold/50 bg-gold-soft/40 px-3 py-2.5 text-xs flex flex-col gap-1.5">
+      <p className="font-semibold">Why you can't approve yet</p>
+      {reasons.map((i) => <p key={i.code} className="text-ink-soft leading-snug">{i.message}</p>)}
+      {needsCard && co.provider_option && co.pay_with !== "provider" && (
+        <button type="button" disabled={busy} onClick={onNewCard}
+          className="self-start mt-0.5 rounded-full bg-btn text-btn-ink px-3 py-1.5 font-medium">Pay with a new card instead</button>
+      )}
+    </div>
+  );
+}
+
+/** The transcript's record of a new-card payment: the card itself is entered on the
+ *  Secure Payment Sheet (the payment provider's page over this panel), never here. */
+export function ProviderHandoffCard({ amount, currency, active, sheetOpen, onOpen, onCheck }:
+  { amount: number; currency: string; active: boolean; sheetOpen: boolean; onOpen: () => void; onCheck: () => void }) {
+  return (
+    <Shell className={cx("p-4 flex flex-col gap-2", active && "border-talk/60")}>
+      <p className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck size={16} className="text-talk" /> Secure payment</span>
+        <span className="text-xs text-muted tabular-nums">{money(amount)} {currency}</span>
+      </p>
+      <p className="text-xs text-muted leading-snug">
+        {!active ? "Handled on the secure payment sheet."
+          : sheetOpen ? "Enter your card on the secure payment sheet. Talkshop never sees your card number or CVC."
+          : "Your card is entered on the secure payment sheet. Talkshop never sees your card number or CVC."}
+      </p>
+      {active && !sheetOpen && (
+        <div className="flex flex-col gap-1.5">
+          <Button size="sm" variant="talk" onClick={onOpen}><Lock size={14} /> Open secure payment</Button>
+          <button type="button" onClick={onCheck} className="self-center text-[11px] text-muted underline hover:text-ink">
+            Already paid? Check status</button>
+        </div>
+      )}
+    </Shell>
+  );
+}
+
 export function AgentPaySetupCard({ active, onSetup }: { active: boolean; onSetup: () => void }) {
   return (
     <Shell className={cx("p-4 flex flex-col gap-2.5", active && "border-gold/60")}>

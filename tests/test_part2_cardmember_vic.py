@@ -18,7 +18,7 @@ from backend.db.schema import (AgentToken, CardAccount, CommerceSignal, GatewayA
                                ProductVariant)
 from backend.main import app
 from backend.vic.common import now
-from tests.conftest import register_member
+from tests.conftest import register_member, scoped_consent
 
 HOME = {"full_name": "Test Member", "line1": "1 Main St", "city": "Austin", "state": "tx", "postal_code": "78701"}
 SKU = "SSP002-ORANGE-9"          # a running shoe: the 15% member offer applies
@@ -80,7 +80,7 @@ def approve(client, h, co_id, verified=True):
 
 
 def pay(client, h, co_id, instruction_id=None):
-    body = {"consent": True}
+    body = scoped_consent(client, h, co_id)                      # CH-4: approve the exact invoice
     if instruction_id:
         body["instruction_id"] = instruction_id
     return client.post(f"/api/checkouts/{co_id}/confirm", json=body, headers=h)
@@ -93,9 +93,10 @@ def code(r):
 # ── Identity and marketplace ────────────────────────────────────────────────
 
 # Browsing the catalog and chatting with Talkshop are open to everyone (Oct 11);
-# these marketplace services stay cardmember-only.
+# CH-2: these services need a signed-in ShopSphere customer (any card issuer).
+# The cart is open to everyone (visitors too).
 PROTECTED = [("get", "/api/offers"), ("get", "/api/rewards"),
-             ("get", "/api/cart/lines"), ("get", "/api/me/payment-methods"), ("get", "/api/vic/status"),
+             ("get", "/api/me/payment-methods"), ("get", "/api/vic/status"),
              ("post", "/api/checkouts")]
 
 
@@ -108,14 +109,18 @@ def test_eligible_visa_and_mastercard_members_enter(client):
         assert client.get("/api/offers", headers=h).status_code == 200
 
 
-def test_checking_only_customer_is_denied_everywhere(client):
+def test_checking_only_customer_can_shop_but_gets_no_chase_benefits(client):
+    """CH-2: Chase status is no longer the gate. Priya (Chase checking only) uses
+    the marketplace like any customer; no offers (not a Chase credit card)."""
     h = login(client, "priya@shopsphere.demo")
-    assert client.get("/api/member", headers=h).json()["code"] == "NO_ELIGIBLE_CARD"
+    m = client.get("/api/member", headers=h).json()
+    assert m["eligible"] and m["code"] is None and m["chase_benefits"] is False and m["credit_card_holder"] is False
     for method, url in PROTECTED:
         r = getattr(client, method)(url, headers=h, **({"json": {"line_ids": ["x"]}} if method == "post" else {}))
-        assert r.status_code == 403 and code(r) == "NO_ELIGIBLE_CARD", url
-    products = client.get("/api/products", headers=h)                 # can browse, at regular prices
-    assert products.status_code == 200 and all(p["member"] is None for p in products.json())
+        assert r.status_code != 403, url
+    assert client.get("/api/offers", headers=h).json() == []
+    products = client.get("/api/products", headers=h)                 # regular prices, no offers
+    assert products.status_code == 200 and all(p["member"]["offers"] == [] for p in products.json())
 
 
 def test_guest_is_denied_everywhere(client):
@@ -125,14 +130,15 @@ def test_guest_is_denied_everywhere(client):
     for method, url in PROTECTED:
         r = getattr(client, method)(url, headers=h, **({"json": {"line_ids": ["x"]}} if method == "post" else {}))
         assert r.status_code == 403 and code(r) == "LOGIN_REQUIRED", url
-    assert client.get("/api/products", headers=h).json()[0]["member"] is None   # browse only, no member extras
+    assert client.get("/api/products", headers=h).json()[0]["member"] is None   # browse, no extras
+    assert client.get("/api/cart/lines", headers=h).status_code == 200            # the cart is open
     assert client.get("/api/products").status_code == 401             # no session at all
 
 
-def test_new_signup_without_a_card_is_not_eligible(client):
+def test_new_signup_without_a_chase_card_is_a_customer_without_offers(client):
     h, _ = register_member(account_type="checking")
-    assert client.get("/api/cart/lines", headers=h).status_code == 403
-    assert client.get("/api/products?limit=1", headers=h).json()[0]["member"] is None
+    assert client.get("/api/cart/lines", headers=h).status_code == 200
+    assert client.get("/api/products?limit=1", headers=h).json()[0]["member"]["offers"] == []
 
 
 # ── Shopping ────────────────────────────────────────────────────────────────

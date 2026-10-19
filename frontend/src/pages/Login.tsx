@@ -7,32 +7,39 @@ import { Wordmark } from "../components/shopsphere/StoreHeader";
 import { Button, Field, Notice, cx } from "../components/ui";
 
 /**
- * Cardmember sign-in and sign-up (Part 2). ShopSphere is a restricted
- * marketplace for eligible Chase credit-card members (simulated). Demo
- * personas sign in with one click; new customers create an account by
- * matching the name, email and last four digits on their Chase card account
- * (simulated directory). The server decides who may enter (GET /api/member).
+ * Sign in and sign up (CH-2). ShopSphere is for every credit-card holder; Chase
+ * status only adds Chase-exclusive benefits. Demo personas sign in with one
+ * click. New customers create a plain ShopSphere account; linking a Chase credit
+ * card (name + email + last four digits matched against the simulated Chase
+ * directory) is optional and only unlocks Chase benefits. All data is simulated.
  */
 const PASSWORD = "demo1234";
 const PERSONAS = [
+  { key: "F", name: "Dana", email: "dana@shopsphere.demo", card: "Citi Mastercard ending 5678",
+    note: "Credit-card holder · ShopSphere pricing + points", tone: "good" },
+  { key: "G", name: "Ravi", email: "ravi@shopsphere.demo", card: "American Express ending 9012",
+    note: "Credit-card holder · Amex network", tone: "good" },
+  { key: "H", name: "Chris", email: "chris@shopsphere.demo", card: "Chase Visa 1234 + Citi Mastercard 5678",
+    note: "Chase benefits · Visa agent payments active", tone: "chase" },
   { key: "A", name: "Kaajal", email: "kaajal@shopsphere.demo", card: "Chase Visa ending 4821",
-    note: "Eligible · Visa agent payments active", tone: "good" },
+    note: "Chase benefits · Visa agent payments active", tone: "chase" },
   { key: "B", name: "Marcus", email: "marcus@shopsphere.demo", card: "Chase Mastercard ending 5510",
-    note: "Eligible · standard card payment (no VIC)", tone: "good" },
+    note: "Chase benefits · standard card payment (no VIC)", tone: "chase" },
   { key: "E", name: "Elena", email: "elena@shopsphere.demo", card: "Chase Visa ending 4002",
-    note: "Eligible · must set up agent payments first", tone: "warn" },
+    note: "Chase benefits · must set up agent payments first", tone: "warn" },
   { key: "C", name: "Priya", email: "priya@shopsphere.demo", card: "Chase checking ending 7702",
-    note: "Not eligible · checking account only", tone: "bad" },
+    note: "No credit card yet · can shop, can't pay", tone: "bad" },
 ] as const;
 
 export default function Login() {
   const navigate = useNavigate();
-  const { login, registerCardmember } = useAuth();
+  const { login, register, registerCardmember } = useAuth();
   const [params] = useSearchParams();
   const next = params.get("next");
   const [screen, setScreen] = useState<"signin" | "signup">(params.get("signup") ? "signup" : "signin");
   const [fullName, setFullName] = useState("");
   const [last4, setLast4] = useState("");
+  const [linkChase, setLinkChase] = useState(false);       // optional: link a Chase card for Chase benefits
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
@@ -55,7 +62,8 @@ export default function Login() {
     e.preventDefault();
     setError(null); setBusy("signup");
     try {
-      const r = await registerCardmember(fullName, email, password, last4);
+      const r = linkChase ? await registerCardmember(fullName, email, password, last4)
+        : await register(fullName.trim(), email, password);
       navigate(await afterSignIn(next, r.merged_lines), { replace: true });
     } catch (err) {
       setError((err as Error).message);
@@ -73,19 +81,19 @@ export default function Login() {
         <div className="absolute -right-10 bottom-24 w-[260px] h-[260px] rounded-full border border-white/10" aria-hidden />
         <Wordmark className="relative [&_span:last-child]:text-white" />
         <div className="relative max-w-md flex flex-col gap-5">
-          <p className="text-[11px] font-semibold tracking-[0.24em] text-gold uppercase">Cardmember marketplace</p>
+          <p className="text-[11px] font-semibold tracking-[0.24em] text-gold uppercase">The marketplace for credit-card holders</p>
           <h1 className="text-4xl font-semibold tracking-tight leading-[1.1]">
-            Member pricing, rewards and an AI shopping assistant, in one place.
+            Shop with any credit card. Chase cardholders get exclusive offers.
           </h1>
           <ul className="flex flex-col gap-3 text-white/80 text-[15px]">
-            <li className="flex gap-3"><Landmark size={18} className="text-gold shrink-0 mt-0.5" />For eligible Chase credit-card members</li>
+            <li className="flex gap-3"><Landmark size={18} className="text-gold shrink-0 mt-0.5" />Visa, Mastercard, Amex or Discover, from any bank</li>
             <li className="flex gap-3"><Sparkles size={18} className="text-gold shrink-0 mt-0.5" />Shop by conversation with Talkshop AI</li>
             <li className="flex gap-3"><ShieldCheck size={18} className="text-gold shrink-0 mt-0.5" />Every payment approved by you, one exact order at a time</li>
           </ul>
         </div>
         <p className="relative text-xs text-white/50 max-w-md">
-          Concept demo. ShopSphere is not affiliated with JPMorgan Chase or Visa. All identities, cards, rewards and
-          payments are simulated.
+          Concept demo. ShopSphere is not affiliated with JPMorgan Chase, Citi, American Express, Visa or Mastercard.
+          All identities, cards, rewards and payments are simulated.
         </p>
       </div>
 
@@ -93,7 +101,7 @@ export default function Login() {
       <div className="flex flex-col items-center justify-center p-5 sm:p-12">
         <div className="w-full max-w-md flex flex-col gap-6">
           <Wordmark className="lg:hidden self-center" />
-          {next && <Notice tone="talk">Sign in with your cardmember account to continue.</Notice>}
+          {next && <Notice tone="talk">Sign in or create a ShopSphere account to continue. Your cart comes with you.</Notice>}
           <div className="grid grid-cols-2 rounded-full bg-panel p-1 text-sm font-medium">
             {(["signin", "signup"] as const).map((s) => (
               <button key={s} type="button" onClick={() => go(s)}
@@ -108,18 +116,23 @@ export default function Login() {
               <div>
                 <h2 className="text-2xl font-semibold tracking-tight">New to ShopSphere?</h2>
                 <p className="text-muted text-sm mt-1 leading-relaxed">
-                  Create your account with the <span className="text-ink font-medium">same name and email as your Chase
-                  account</span>, and the <span className="text-ink font-medium">last four digits</span> of your Chase
-                  credit card. We check them with Chase (simulated) before your account is created.
+                  Create your ShopSphere account to check out with your credit card and earn points. No card details
+                  are asked for here.
                 </p>
               </div>
-              <Field label="Full name (as on your Chase account)" value={fullName} onChange={(e) => setFullName(e.target.value)}
-                required autoComplete="name" />
-              <Field label="Email (the one on your Chase account)" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                required autoComplete="email" />
-              <Field label="Last 4 digits of your Chase credit card" value={last4} required inputMode="numeric"
-                autoComplete="off" maxLength={4} pattern="\d{4}" placeholder="e.g. 1188"
-                onChange={(e) => setLast4(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+              <Field label={linkChase ? "Full name (as on your Chase account)" : "Full name"} value={fullName}
+                onChange={(e) => setFullName(e.target.value)} required autoComplete="name" />
+              <Field label={linkChase ? "Email (the one on your Chase account)" : "Email"} type="email" value={email}
+                onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+              <label className="flex items-start gap-2.5 rounded-xl border border-line px-3.5 py-3 text-sm cursor-pointer">
+                <input type="checkbox" className="mt-0.5" checked={linkChase} onChange={(e) => setLinkChase(e.target.checked)} />
+                <span>I have a Chase credit card. <span className="text-muted">Link it for Chase-exclusive offers (optional).</span></span>
+              </label>
+              {linkChase && (
+                <Field label="Last 4 digits of your Chase credit card" value={last4} required inputMode="numeric"
+                  autoComplete="off" maxLength={4} pattern="\d{4}" placeholder="e.g. 1188"
+                  onChange={(e) => setLast4(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+              )}
               <div className="relative">
                 <Field label="Create a password (min 8 characters)" type={show ? "text" : "password"} value={password}
                   onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
@@ -127,19 +140,21 @@ export default function Login() {
                   className="absolute right-3 bottom-3 text-muted hover:text-ink">{show ? <EyeOff size={17} /> : <Eye size={17} />}</button>
               </div>
               {error && <Notice>{error}</Notice>}
-              <Button type="submit" size="lg" loading={busy === "signup"}>Verify and create account</Button>
-              <p className="flex items-start gap-2 text-xs text-muted leading-relaxed">
-                <ShieldCheck size={14} className="shrink-0 mt-0.5 text-good" />
-                We only ask for the last four digits, never your full card number or security code. Demo cardholders
-                you can use: Alex Rivera · alex.rivera@cardmember.demo · 1188 (Visa), Jordan Lee ·
-                jordan.lee@cardmember.demo · 2277 (Mastercard), Sam Patel · sam.patel@cardmember.demo · 3366 (Visa and
-                Mastercard).
-              </p>
+              <Button type="submit" size="lg" loading={busy === "signup"}>{linkChase ? "Create account and link Chase card" : "Create account"}</Button>
+              {linkChase && (
+                <p className="flex items-start gap-2 text-xs text-muted leading-relaxed">
+                  <ShieldCheck size={14} className="shrink-0 mt-0.5 text-good" />
+                  The name, email and last four digits must match your Chase account (simulated). We never ask for your
+                  full card number or security code. Demo Chase cardholders: Alex Rivera · alex.rivera@cardmember.demo ·
+                  1188 (Visa), Jordan Lee · jordan.lee@cardmember.demo · 2277 (Mastercard), Sam Patel ·
+                  sam.patel@cardmember.demo · 3366 (Visa and Mastercard).
+                </p>
+              )}
             </form>
           ) : (
           <>
           <div>
-            <h2 className="text-2xl font-semibold tracking-tight">Cardmember sign in</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Sign in</h2>
             <p className="text-muted text-sm mt-1">Pick a demo persona, or sign in with email and password.</p>
           </div>
 
@@ -150,7 +165,8 @@ export default function Login() {
                 <span className="w-9 h-9 rounded-full bg-navy text-white grid place-items-center text-sm font-semibold shrink-0">{p.key}</span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-semibold">{p.name} <span className="font-normal text-muted">· {p.card}</span></span>
-                  <span className={cx("block text-xs mt-0.5", p.tone === "good" ? "text-good" : p.tone === "warn" ? "text-gold" : "text-bad")}>
+                  <span className={cx("block text-xs mt-0.5", p.tone === "good" ? "text-good" : p.tone === "chase" ? "text-accent"
+                    : p.tone === "warn" ? "text-gold" : "text-bad")}>
                     {p.note}
                   </span>
                 </span>
@@ -162,7 +178,7 @@ export default function Login() {
               <span className="w-9 h-9 rounded-full bg-panel text-muted grid place-items-center shrink-0"><UserRound size={16} /></span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-semibold">D · Guest</span>
-                <span className="block text-xs text-muted mt-0.5">Not signed in · sees the public page only</span>
+                <span className="block text-xs text-muted mt-0.5">Not signed in · search, browse, cart; sign in at checkout</span>
               </span>
               <ArrowRight size={16} className="text-muted shrink-0" />
             </Link>

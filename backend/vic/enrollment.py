@@ -25,9 +25,10 @@ def _visa_account(db: Session, user_id: str, card_account_id: str) -> CardAccoun
     acct = db.query(CardAccount).filter_by(account_id=card_account_id, user_id=user_id).first()
     if not acct:
         raise VicError("UNKNOWN_CARD_ACCOUNT", "That card isn't on your account.", 404)
+    # CH-9: a Visa-network capability (flag set by the simulated issuer), not "is a Chase card"
     if acct.account_type != "credit_card" or acct.network != "Visa" or acct.status != "active" \
-            or not acct.marketplace_eligible or not acct.payment_method_id:
-        raise VicError("NOT_VISA_ELIGIBLE", "Agent payments need an active, eligible Chase Visa credit card.", 400)
+            or not acct.agent_pay_capable or not acct.payment_method_id:
+        raise VicError("NOT_VISA_ELIGIBLE", "Agent payments need an active Visa credit card that supports them.", 400)
     return acct
 
 

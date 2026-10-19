@@ -4,7 +4,7 @@
  * "Ask Talkshop" button. Mounted once in the store layout, so the
  * conversation carries on as the shopper moves between pages.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Info, Minus, RotateCcw, Sparkles, X } from "lucide-react";
 import { ShopError } from "../../api/shop";
 import { PasskeyCancelled, usePasskey } from "../../member/PasskeyContext";
@@ -14,8 +14,9 @@ import type { Checkout } from "../../api/shop";
 import type { TraceStep } from "../../talkshop/useTalkshop";
 import { useTalkshopShared } from "../../talkshop/TalkshopContext";
 import Composer from "./Composer";
+import SecurePaymentSheet from "../payments/SecurePaymentSheet";
 import {
-  AgentPaySetupCard, ApprovalCard, CartUpdatedCard, CheckoutCountdown, OptionChips, OrderConfirmedCard, PaymentStatusCard, QuickReplies,
+  AgentPaySetupCard, ApprovalCard, ProviderHandoffCard, CartUpdatedCard, CheckoutCountdown, OptionChips, OrderConfirmedCard, PaymentStatusCard, QuickReplies,
   OrderTrackingCard, RecommendationCards, ReviewOrderCard, SecureDetailsCard, SelectedProduct, SignInCard, TrackLookupCard,
 } from "./cards";
 import { cx } from "../ui";
@@ -28,8 +29,8 @@ const STEP_OF: Record<Stage, number> = {
 };
 const AGENTS: Record<string, string> = {
   VibeCheck: "Understands the request", SneakPeek: "Searches the ShopSphere catalog only",
-  CartUp: "Cart, offers & authoritative totals", GreenLight: "Consent + DPAT (scoped token)",
-  PayIt: "12 DPAT checks, then the gateway", TrackIt: "Order, email & tracking",
+  CartUp: "Cart, offers & authoritative totals", GreenLight: "Consent + scoped payment token",
+  PayIt: "Verifies the token, then the gateway", TrackIt: "Order, email & tracking",
 };
 
 export default function TalkshopPanel() {
@@ -37,6 +38,7 @@ export default function TalkshopPanel() {
   const { open, setOpen } = ts;
   const [presenter, setPresenter] = useState(false);
 
+  const sheet = useSecurePaymentSheet(ts);
   if (!open) {
     return (
       <button onClick={() => setOpen(true)}
@@ -49,6 +51,7 @@ export default function TalkshopPanel() {
   return (
     <>
       <div className="lg:hidden fixed inset-0 z-40 bg-black/30" onClick={() => setOpen(false)} />
+      {/* The secure payment sheet covers this panel only (no new window, no navigation). */}
       <aside
         aria-label="Talkshop assistant"
         className={cx("z-50 flex flex-col bg-canvas border-line",
@@ -57,10 +60,15 @@ export default function TalkshopPanel() {
         <Header stage={ts.stage} onMinimise={() => setOpen(false)} onRestart={ts.restart}
           presenter={presenter} onPresenter={() => setPresenter((p) => !p)} />
         <div className="relative flex-1 min-h-0">
-          <Conversation ts={ts} />
+          <Conversation ts={ts} sheetOpen={sheet.open} onOpenSheet={sheet.reopen} />
           {presenter && <PresenterTrace trace={ts.trace} onClose={() => setPresenter(false)} />}
         </div>
-        <Composer disabled={ts.busy} onSend={(text, image) => ts.send(image ? { text, image_base64: image } : { text })} />
+        <Composer disabled={ts.busy || sheet.open} onSend={(text, image) => ts.send(image ? { text, image_base64: image } : { text })} />
+        {sheet.open && sheet.ev && (
+          <SecurePaymentSheet merchant="ShopSphere" amount={sheet.ev.amount} currency={sheet.ev.currency}
+            hostedUrl={sheet.ev.hosted_url} sessionId={sheet.ev.payment_session_id} onClose={sheet.close}
+            onResult={sheet.report} onAbandon={sheet.abandon} />
+        )}
       </aside>
     </>
   );
@@ -78,7 +86,7 @@ function Header({ stage, onMinimise, onRestart, presenter, onPresenter }:
         <span className="w-9 h-9 rounded-full bg-talk text-white grid place-items-center"><Sparkles size={17} /></span>
         <div className="flex-1 min-w-0 leading-tight">
           <p className="font-semibold">Talkshop AI</p>
-          <p className="text-xs text-muted">Your cardmember shopping assistant</p>
+          <p className="text-xs text-muted">Your ShopSphere shopping assistant</p>
         </div>
         <IconBtn title="Developer trace: how Talkshop works" on={presenter} onClick={onPresenter}><Info size={16} /></IconBtn>
         <IconBtn title="New conversation" onClick={onRestart}><RotateCcw size={15} /></IconBtn>
@@ -143,7 +151,8 @@ function lastIndex(events: TalkEvent[], type: TalkEvent["type"]) {
   return -1;
 }
 
-function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
+function Conversation({ ts, sheetOpen, onOpenSheet }: { ts: ReturnType<typeof useTalkshopShared>; sheetOpen: boolean;
+  onOpenSheet: () => void }) {
   const { events, stage, busy, status, error } = ts;
   const items = useMemo(() => buildItems(events), [events]);
   const scroller = useRef<HTMLDivElement>(null);
@@ -165,6 +174,7 @@ function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
   const lastTrackForm = lastIndex(events, "track_order_form");
   const lastApproval = lastIndex(events, "approval_required");
   const lastSetup = lastIndex(events, "agent_pay_setup");
+  const lastHandoff = lastIndex(events, "provider_handoff");
   const { approveAgentPayment, enrollAgentPay } = usePasskey();
   const member = useMember();
   const [vicError, setVicError] = useState<string | null>(null);
@@ -192,7 +202,9 @@ function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
     }
   };
   // Each auto-checkout countdown fires at most once, whatever re-renders after it.
-  const countdownsFired = useRef(new Set<number>());
+  // Keyed by the offer event itself, not its position: after a restart the
+  // positions begin again at 0, and a new offer must still count down.
+  const countdownsFired = useRef(new WeakSet<object>());
 
   return (
     <div ref={scroller} className="absolute inset-0 overflow-y-auto ss-scroll px-4 py-4 flex flex-col gap-3 [&>*]:shrink-0">
@@ -229,14 +241,14 @@ function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
           case "offer_checkout": {
             const live = it.index === lastOffer && lastOffer > lastReview && !busy && (stage === "OFFER_CHECKOUT" || stage === "IN_CART");
             const pick = (c: { value: string; label: string }) => {
-              countdownsFired.current.add(it.index);
+              countdownsFired.current.add(ev);
               act({ type: c.value === "checkout" ? "checkout" : "keep_shopping", label: c.label });
             };
             // The step after this offer has already happened (a tap, the auto-checkout,
             // the sign-in card): the offer is done — never count down again.
             const settled = lastUser > it.index || lastLogin > it.index;
             const counting = live && !settled && stage === "OFFER_CHECKOUT"
-              && it.index >= ts.restoredCount && !countdownsFired.current.has(it.index);
+              && it.index >= ts.restoredCount && !countdownsFired.current.has(ev);
             if (counting) return <CheckoutCountdown key={i} onPick={pick} />;
             return <QuickReplies key={i} choices={ev.choices} active={live && !settled} onPick={pick} />;
           }
@@ -254,6 +266,12 @@ function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
             return <ApprovalCard key={i} amount={ev.amount} payment={ev.payment}
               active={it.index === lastApproval && stage === "AWAITING_CONSENT" && !busy && lastUser < it.index}
               autoStart={it.index >= ts.restoredCount} onApprove={() => approve(ev)} />;
+          case "provider_handoff":
+            return <ProviderHandoffCard key={i} amount={ev.amount} currency={ev.currency}
+              active={it.index === lastHandoff && stage === "AWAITING_CONSENT" && lastUser < it.index}
+              sheetOpen={sheetOpen} onOpen={onOpenSheet}
+              onCheck={() => act({ type: "provider_complete", checkout_id: ev.checkout_id, payment_session_id: ev.payment_session_id,
+                label: "Check my payment" })} />;
           case "agent_pay_setup": {
             const reviewEv = events[lastReview];
             const card = reviewEv?.type === "checkout_ready" ? reviewEv.checkout.payment_method?.display ?? "Visa" : "Visa";
@@ -281,35 +299,65 @@ function Conversation({ ts }: { ts: ReturnType<typeof useTalkshopShared> }) {
 }
 
 /* ── Developer trace (presenter view) ──────────────────────────────────── */
-const GUARDRAILS: { agent: string; checks: string[] }[] = [
-  { agent: "Eligibility", checks: ["Every marketplace API: signed-in member with an active, eligible Chase credit card (simulated fixture)",
-    "Guests → LOGIN_REQUIRED; checking-only → NO_ELIGIBLE_CARD (enforced on the server, not just hidden in the UI)"] },
-  { agent: "VibeCheck", checks: ["Card numbers, CVC and expiry masked in the browser and again on the server",
-    "Emails masked before the AI sees the history", "Input guardrail: keyword list + NeMo", "Not-sold blocker",
-    "The AI may only pick an action allowed at this stage; payment is never one of them"] },
-  { agent: "SneakPeek", checks: ["ShopSphere's catalog only (merchant-restricted search)", "Prices, stock, offers and points from the server",
-    "AI relevance check (no unrelated cards)"] },
-  { agent: "CartUp", checks: ["Exact size/colour stock check", "Server picks the member offer; totals + SHA-256 fingerprint are server-only",
-    "Secure forms: details go to ShopSphere, the AI gets IDs", "Changing the order cancels any open Visa instruction"] },
-  { agent: "GreenLight", checks: ["Approve and pay (tap, or typed GO AHEAD) + simulated passkey on the Visa path; no automatic payment",
-    "Live stock and price refresh", "Spending policy: approved merchant, USD, up to $2,500",
-    "DPAT: HMAC-SHA256 signed, 15 minutes, single use"] },
-  { agent: "PayIt", checks: ["12 DPAT checks: exists · active · not expired · not used · agent · merchant · order · currency · limit · total · fingerprint · consent",
-    "Visa path: 12 VIC-inspired controls, then a one-time purchase credential", "Gateway request with an idempotency key; decline / timeout = no order"] },
-  { agent: "TrackIt", checks: ["Order created once, only after authorization; voided if creation fails",
-    "Points and offers recorded once per order (no double redemption)", "Confirmation email", "Tracking"] },
+/* Both lists follow the order a purchase runs in, matching the Find → Choose → Review →
+   Approve → Done stepper and the order of the Live trace. */
+const GUARDRAILS: { step: string; agent: string; checks: string[] }[] = [
+  { step: "Find", agent: "VibeCheck · understands the request", checks: [
+    "Card numbers, CVC and expiry masked in the browser and again on the server, before the AI or the transcript sees them",
+    "Emails masked before the AI sees the history; typed addresses kept out of the chat",
+    "Input guardrail: keyword list + NeMo; not-sold blocker",
+    "The AI may only pick an action allowed at this stage; paying is never one of them",
+    "Order questions are answered from records, not by the AI"] },
+  { step: "Find", agent: "SneakPeek · finds products", checks: [
+    "ShopSphere's catalog only (merchant-restricted search)",
+    "Prices, stock, ratings, offers and points come from the server, never the AI",
+    "AI relevance check (no unrelated products)"] },
+  { step: "Choose", agent: "CartUp · cart", checks: [
+    "Exact size/colour stock check before adding to the cart",
+    "Same ShopSphere cart as the website; visitors keep their cart when they sign up"] },
+  { step: "Review", agent: "CartUp · access + checkout", checks: [
+    "Browse, Talkshop and the cart: everyone. Checkout: a signed-in customer (any card issuer). Paying: a credit-card holder",
+    "Chase status is an entitlement, not the gate: Chase offers and 2× points only when paying with an eligible Chase credit card",
+    "Merchant-owned checkout: totals, SHA-256 fingerprint and version are server-only",
+    "Secure forms: address and payment choice go to ShopSphere; the AI gets IDs only",
+    "Changing the order cancels any open Visa instruction"] },
+  { step: "Approve", agent: "GreenLight · consent (the mandate)", checks: [
+    "Only the shopper's own tap approves (Approve & Pay / Continue to Secure Payment); no automatic or countdown payment",
+    "Consent scoped to action PAY · merchant · order · amount · currency · checkout version; a changed order is refused (STALE_CHECKOUT)",
+    "Live stock, price and Chase-benefit revalidation against the selected card",
+    "Spending policy: approved merchant, USD, up to $2,500",
+    "Consent record + HMAC-signed, single-use, 15-minute payment token (DPAT)",
+    "Cancelled approvals are recorded (APPROVAL_CANCELLED); nothing charged"] },
+  { step: "Approve", agent: "PayIt · payment", checks: [
+    "Token signature verified, token used once, then the 12 DPAT checks before any charge",
+    "One route: saved card (any network) · Visa agent payment (agent-pay capable Visa only) · new card on the Secure Payment Sheet · wallet",
+    "Visa route: passkey-authenticated instruction, 12 VIC-inspired controls, one-time purchase credential",
+    "New card: provider-owned page in the sheet (test cards only), card tokenized and verified by the provider; Talkshop sees only network + last 4",
+    "New card: result checked server-to-server, then PayIt authorizes once; closing the sheet or cancelling verification = back to review, nothing charged",
+    "Idempotency on every request; a decline or timeout means no order and no double charge"] },
+  { step: "Done", agent: "TrackIt · order", checks: [
+    "Order created once, only after authorization; released if creation fails",
+    "Points and offers recorded once per order (no double redemption)",
+    "Confirmation email without card data; tracking by Order ID + email"] },
 ];
 
-const PROTOCOLS: { name: string; what: string; where: string }[] = [
-  { name: "VIC", what: "Visa Intelligent Commerce (Visa's agent-payment capabilities)",
-    where: "Inspired by: agent token, passkey step-up, authenticated instruction, controls, purchase credential, commerce signals. Local simulation, not connected to Visa, not VIC compliant." },
-  { name: "VTS", what: "Visa Token Service", where: "Not used. Our agent tokens (vat_…) are random local values, not VTS or network tokens." },
-  { name: "AP2", what: "Agent payments: proof the member approved this exact cart", where: "AP2-style consent record, DPAT and 12 checks. Local HMAC, not production-compliant." },
-  { name: "ACP", what: "Agentic checkout", where: "ACP-style merchant-owned checkout (create / update / complete). Kept separate from the PSP credential." },
-  { name: "UCP", what: "Common commerce capabilities", where: "UCP-inspired discovery, identity and orders over local REST/JSON. Not full UCP compliance." },
-  { name: "MCP", what: "Model Context Protocol", where: "Not used in Demo 1: Talkshop picks from a fixed in-process tool list (MCP-style idea, no MCP client/server)." },
-  { name: "A2A", what: "Agent-to-agent across companies", where: "Not needed: Demo 1's six agents run inside one app. (Demo 2 covers assistant → merchant agent.)" },
-  { name: "TAP", what: "Visa Trusted Agent Protocol", where: "Not used: relevant when an independent external agent visits a merchant (Demo 2), not for an embedded merchant agent." },
+const PROTOCOLS: { step: string; name: string; what: string; where: string }[] = [
+  { step: "Find", name: "MCP-style", what: "Tool choice: the AI picks one allowed action",
+    where: "The AI reads the request and picks a tool from a fixed list for the current stage (search, select, checkout…). Code checks the choice; no MCP server is used." },
+  { step: "Find", name: "UCP", what: "Common commerce capabilities: discovery and identity",
+    where: "UCP-inspired product discovery from ShopSphere's catalog, and identity linking (sign in or sign up inside Talkshop, cart kept). Local REST/JSON, not full UCP compliance." },
+  { step: "Choose · Review", name: "ACP", what: "Agentic checkout: the merchant owns the order",
+    where: "ACP-style cart and merchant-owned checkout (create / update): server-side totals, fingerprint and version; secure forms for details. Kept separate from the payment credential." },
+  { step: "Approve", name: "AP2", what: "Agent payments: proof the shopper approved this exact cart",
+    where: "AP2-style mandate: scoped consent, consent record, HMAC-signed single-use payment token (DPAT), then 12 checks. Local simulation, not production-compliant." },
+  { step: "Approve · Visa route", name: "VIC", what: "Visa Intelligent Commerce (Visa's agent-payment capabilities)",
+    where: "Only for agent-pay capable Visa cards. Inspired by: agent token, passkey step-up, authenticated instruction, 12 controls, purchase credential, commerce signal. Local simulation, not connected to Visa, not VIC compliant." },
+  { step: "Approve · new card", name: "PSP", what: "Payment provider's hosted page (Secure Payment Sheet)",
+    where: "Simulated Secure Payment Provider page inside the sheet: test cards only, card tokenized and verified by the provider; ShopSphere gets a token, network and last 4, and PayIt asks for the authorization. A simulation of the flow, not a PCI boundary." },
+  { step: "Approve · saved card", name: "Gateway", what: "Saved card through the payment gateway",
+    where: "Saved card token (no card number) → simulated gateway → simulated card network (Visa, Mastercard, Amex, Discover) → simulated issuer, with an idempotency key." },
+  { step: "Done", name: "ACP", what: "Complete checkout: order and updates",
+    where: "ACP-style complete: the order is created once, only after authorization; confirmation email and UCP-inspired order tracking." },
 ];
 
 const EMAIL_STEPS = [
@@ -321,14 +369,16 @@ const EMAIL_STEPS = [
   "Outbox records sent / failed; an email problem never undoes the order",
 ];
 
+const TOKEN_VERIFIED = "Payment token verified";
+
 /** The Visa path's 12 milestones (brief §8), matched against real trace entries. */
 const VIC_STEPS: { label: string; match: (t: TraceStep) => boolean }[] = [
-  { label: "Cardmember eligibility", match: (t) => t.check === "VIC control 1/12 · Cardmember session + eligibility" },
+  { label: "Customer access", match: (t) => t.check === "VIC control 1/12 · Customer session + access" },
   { label: "Visa card + agent token active", match: (t) => t.check === "VIC control 3/12 · Active agent token" },
   { label: "Checkout created", match: (t) => t.check === "Merchant-owned checkout" },
   { label: "Payment instruction authenticated", match: (t) => t.check === "VIC control 4/12 · Instruction authenticated" },
-  { label: "GreenLight checks (DPAT 12/12)", match: (t) => t.check === "DPAT check 12/12 · Consent record exists" },
-  { label: "VIC-inspired controls (12/12)", match: (t) => t.check === "VIC control 12/12 · Inventory + final checkout state" },
+  { label: "Payment token verified", match: (t) => t.check === TOKEN_VERIFIED },
+  { label: "Visa agent-payment controls", match: (t) => t.check === "VIC control 12/12 · Inventory + final checkout state" },
   { label: "Purchase credential issued", match: (t) => t.check === "Purchase credential issued" },
   { label: "Mock gateway request sent", match: (t) => t.check === "Gateway request sent" },
   { label: "Simulated Visa network controls", match: (t) => t.check === "Simulated Visa network" },
@@ -339,7 +389,52 @@ const VIC_STEPS: { label: string; match: (t: TraceStep) => boolean }[] = [
 
 type InfoTab = "trace" | "vic" | "guardrails" | "protocols" | "email";
 
-function PresenterTrace({ trace, onClose }: { trace: TraceStep[]; onClose: () => void }) {
+/** The payment token's internals stay off screen: its issue step shows without
+ *  details, and PayIt's individual token checks show as one "verified" row. */
+function hideTokenInternals(trace: TraceStep[]): TraceStep[] {
+  const out: TraceStep[] = [];
+  for (const t of trace) {
+    if (t.check === "DPAT issued") {
+      out.push({ ...t, check: "Payment token issued", message: "", protocol: undefined });
+    } else if (t.check?.startsWith("DPAT check ")) {
+      const prev = out[out.length - 1];
+      const blocked = t.result === "blocked";
+      if (prev?.check === TOKEN_VERIFIED && !t.check.startsWith("DPAT check 1/")) {   // same run of checks
+        if (blocked) Object.assign(prev, { result: "blocked", message: "Payment stopped: nothing charged" });
+      } else {
+        out.push({ ...t, check: TOKEN_VERIFIED, protocol: undefined,
+          result: blocked ? "blocked" : "pass", message: blocked ? "Payment stopped: nothing charged" : "" });
+      }
+    } else {
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/** Live trace: the six agents only. Each run of steps by a simulated outside
+ *  service (VIC simulator, gateway, card network, issuer, payment provider)
+ *  shows as one PayIt row; a failure keeps its plain-language reason. */
+function agentsOnly(trace: TraceStep[]): TraceStep[] {
+  const out: TraceStep[] = [];
+  for (const t of trace) {
+    if (t.agent in AGENTS) { out.push(t); continue; }
+    const check = t.agent !== "VIC simulator" ? "Card network authorization"
+      : t.check === "Commerce signal recorded" ? "Purchase reported to Visa" : "Visa agent payment checks";
+    const prev = out[out.length - 1];
+    const blocked = t.result === "blocked";
+    if (prev?.agent === "PayIt" && prev.check === check && prev.layer === "simulated") {
+      if (blocked && prev.result !== "blocked") Object.assign(prev, { result: "blocked", message: t.message });
+    } else {
+      out.push({ agent: "PayIt", check, at: t.at, layer: "simulated",
+        result: blocked ? "blocked" : "pass", message: blocked ? t.message : "" });
+    }
+  }
+  return out;
+}
+
+function PresenterTrace({ trace: rawTrace, onClose }: { trace: TraceStep[]; onClose: () => void }) {
+  const trace = hideTokenInternals(rawTrace);
   const [tab, setTab] = useState<InfoTab>("vic");
   const tabs: [InfoTab, string][] = [["vic", "Payment"], ["trace", "Live trace"], ["guardrails", "Guards"], ["protocols", "Protocols"], ["email", "Email"]];
   const chip = (r?: string) => r === "pass" ? "bg-good-soft text-good" : r === "blocked" ? "bg-bad-soft text-bad" : "bg-panel text-muted";
@@ -412,7 +507,7 @@ function PresenterTrace({ trace, onClose }: { trace: TraceStep[]; onClose: () =>
           </div>
           {trace.length === 0 ? <p className="text-xs text-faint">Each step and guardrail appears here as Talkshop works.</p> : (
             <ol className="flex flex-col gap-2" aria-label="Live guardrail trace">
-              {trace.map((t, i) => (
+              {agentsOnly(trace).map((t, i) => (
                 <li key={i} className="flex gap-2 text-xs">
                   <span className="text-faint tabular-nums w-10 shrink-0">{new Date(t.at).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}</span>
                   <span className="min-w-0 flex-1">
@@ -434,28 +529,34 @@ function PresenterTrace({ trace, onClose }: { trace: TraceStep[]; onClose: () =>
       )}
 
       {tab === "guardrails" && (
-        <div className="flex flex-col gap-2.5">
-          {GUARDRAILS.map((g) => (
-            <div key={g.agent} className="rounded-xl border border-line p-2.5">
-              <p className="text-xs font-semibold text-talk mb-1">{g.agent}</p>
-              <ul className="flex flex-col gap-0.5 text-[11px] text-ink-soft leading-snug list-disc pl-4">
-                {g.checks.map((c) => <li key={c}>{c}</li>)}
-              </ul>
-            </div>
-          ))}
+        <div className="flex flex-col gap-2">
+          <p className="text-[11px] text-muted">The checks each agent runs, in the order a purchase goes through them.</p>
+          <ol className="flex flex-col gap-2.5">
+            {GUARDRAILS.map((g, i) => (
+              <FlowItem key={g.agent} n={i + 1} step={g.step} last={i === GUARDRAILS.length - 1}>
+                <p className="text-xs font-semibold text-talk mb-1">{g.agent}</p>
+                <ul className="flex flex-col gap-0.5 text-[11px] text-ink-soft leading-snug list-disc pl-4">
+                  {g.checks.map((c) => <li key={c}>{c}</li>)}
+                </ul>
+              </FlowItem>
+            ))}
+          </ol>
         </div>
       )}
 
       {tab === "protocols" && (
         <div className="flex flex-col gap-2">
-          <p className="text-[11px] text-muted">How Demo 1 relates to each protocol. "Inspired" or "-style" means a local
-            concept demo, not a certified or compliant implementation.</p>
-          {PROTOCOLS.map((p) => (
-            <div key={p.name} className="rounded-xl border border-line p-2.5 text-[11px]">
-              <p className="text-xs font-semibold"><span className="text-talk">{p.name}</span> · {p.what}</p>
-              <p className="text-muted leading-snug mt-0.5">{p.where}</p>
-            </div>
-          ))}
+          <p className="text-[11px] text-muted">The protocols Demo 1 uses, in the order a purchase meets them. At Approve,
+            one payment route runs. "Inspired" or "-style" means a local concept demo, not a certified or compliant
+            implementation.</p>
+          <ol className="flex flex-col gap-2.5">
+            {PROTOCOLS.map((p, i) => (
+              <FlowItem key={`${p.step}-${p.name}`} n={i + 1} step={p.step} last={i === PROTOCOLS.length - 1}>
+                <p className="text-xs font-semibold"><span className="text-talk">{p.name}</span> · {p.what}</p>
+                <p className="text-[11px] text-muted leading-snug mt-0.5">{p.where}</p>
+              </FlowItem>
+            ))}
+          </ol>
         </div>
       )}
 
@@ -466,4 +567,46 @@ function PresenterTrace({ trace, onClose }: { trace: TraceStep[]; onClose: () =>
       )}
     </div>
   );
+}
+
+/** The secure payment sheet's state: it opens by itself when Talkshop hands a new card
+ *  payment to the provider (not when an old conversation is restored), can be collapsed
+ *  and reopened, and reports the provider's final status so ShopSphere can verify it. */
+/** One numbered step in the Guards / Protocols lists: number, stepper label, connector to the next step. */
+function FlowItem({ n, step, last, children }: { n: number; step: string; last: boolean; children: ReactNode }) {
+  return (
+    <li className="relative flex gap-2.5">
+      {!last && <span className="absolute left-[11px] top-6 -bottom-2.5 w-px bg-line" aria-hidden />}
+      <span className="relative z-[1] shrink-0 w-6 h-6 rounded-full bg-talk text-white text-[11px] font-semibold grid place-items-center">{n}</span>
+      <div className="flex-1 min-w-0 rounded-xl border border-line p-2.5">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-0.5">{step}</p>
+        {children}
+      </div>
+    </li>
+  );
+}
+
+function useSecurePaymentSheet(ts: ReturnType<typeof useTalkshopShared>) {
+  const idx = lastIndex(ts.events, "provider_handoff");
+  const ev = idx >= 0 ? ts.events[idx] as Extract<TalkEvent, { type: "provider_handoff" }> : null;
+  const live = !!ev && ts.stage === "AWAITING_CONSENT" && lastIndex(ts.events, "user_message") < idx;
+  const [openFor, setOpenFor] = useState<number | null>(null);
+  useEffect(() => { if (live && idx >= ts.restoredCount) setOpenFor(idx); }, [idx, live]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const close = useCallback(() => setOpenFor(null), []);
+  const reopen = useCallback(() => setOpenFor(idx), [idx]);
+  // The provider's page finished (session + status only): ShopSphere checks it server-to-server.
+  const report = useCallback((status: string) => {
+    if (!ev) return;
+    const label = status === "VERIFIED" ? "Payment verified with the payment provider"
+      : status === "CANCELLED" ? "Cancelled the payment verification" : "Payment not completed";
+    ts.send({ action: { type: "provider_complete", checkout_id: ev.checkout_id, payment_session_id: ev.payment_session_id, label } });
+  }, [ev, ts]);
+  // Closed with ✕ before finishing: release the session, back to the review (nothing charged).
+  const abandon = useCallback(() => {
+    if (!ev) return;
+    setOpenFor(null);
+    ts.send({ action: { type: "provider_abandon", checkout_id: ev.checkout_id, payment_session_id: ev.payment_session_id,
+      label: "Closed secure payment" } });
+  }, [ev, ts]);
+  return { ev, open: live && openFor === idx, close, reopen, report, abandon };
 }

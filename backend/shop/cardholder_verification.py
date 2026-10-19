@@ -1,6 +1,8 @@
 """
-Cardmember sign-up and card verification (Part 2) — against a SIMULATED Chase
-cardholder directory (issuer_cardholders). No real bank is contacted.
+Linking Chase card benefits (Part 2; CH-2: benefits only, never access) — against
+a SIMULATED Chase cardholder directory (issuer_cardholders). No real bank is
+contacted. Every ShopSphere customer can shop without this; a match only unlocks
+Chase-exclusive benefits.
 
 A new customer gives the name and email on their Chase account plus the last
 four digits of one card. All three must match the same active record:
@@ -20,7 +22,7 @@ phone on file); the digits alone are not proof of ownership.
 
 On a match, every active account of that cardholder (same name + email) is
 linked: credit cards become card_accounts + masked saved cards; a checking
-account is linked too but never grants marketplace access.
+account is linked too but never grants Chase credit-card benefits.
 """
 import os
 import re
@@ -39,8 +41,8 @@ LOCK_WINDOW = timedelta(minutes=15)
 NO_MATCH = ("We couldn't verify those details with Chase (simulated). Use the name and email on your Chase "
             "account and the last four digits of your Chase credit card.")
 LOCKED = "Too many attempts. For your security, please wait 15 minutes and try again."
-NOT_CREDIT = ("Those details match a Chase checking account. The ShopSphere marketplace is for Chase "
-              "credit-card members.")
+NOT_CREDIT = ("Those details match a Chase checking account. Chase benefits on ShopSphere are for Chase "
+              "credit-card holders.")
 
 
 class VerificationError(Exception):
@@ -72,6 +74,7 @@ PERSONA_RECORDS = [
     ("CH_B_MC", "Marcus", "marcus@shopsphere.demo", "credit_card", "Mastercard", "5510", "USR002"),
     ("CH_C_CHK", "Priya", "priya@shopsphere.demo", "checking", None, "7702", "USR003"),
     ("CH_E_VISA", "Elena", "elena@shopsphere.demo", "credit_card", "Visa", "4002", "USR004"),
+    ("CH_H_VISA", "Chris Park", "chris@shopsphere.demo", "credit_card", "Visa", "1234", "USR007"),
 ]
 
 
@@ -141,7 +144,7 @@ def link(db: Session, user_id: str, records: list[IssuerCardholder], holder_name
         if r.account_type == "credit_card":
             pm_id = f"PM_{r.network[:4].upper()}_{r.last4}_{secrets.token_hex(3).upper()}"
             db.add(PaymentMethod(payment_method_id=pm_id, user_id=user_id, brand=r.network, last4=r.last4,
-                                 exp_month=9, exp_year=2030, cardholder_name=holder_name,
+                                 issuer="CHASE", source="issuer_link", exp_month=9, exp_year=2030, cardholder_name=holder_name,
                                  token_ref=f"tok_{secrets.token_urlsafe(18)}", behaviour="approve",
                                  is_default=not has_default))
             has_default = True
@@ -151,6 +154,7 @@ def link(db: Session, user_id: str, records: list[IssuerCardholder], holder_name
                            else f"Chase {r.account_type} account",
                            network=r.network, last4=r.last4, status="active",
                            marketplace_eligible=r.account_type == "credit_card", payment_method_id=pm_id,
+                           agent_pay_capable=r.account_type == "credit_card" and r.network == "Visa",
                            credit_limit=8000.0 if pm_id else None, available_credit=8000.0 if pm_id else None)
         db.add(acct)
         r.claimed_by = user_id

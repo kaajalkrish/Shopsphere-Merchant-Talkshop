@@ -31,12 +31,13 @@ function useTheme(): [boolean, () => void] {
 
 const PUBLIC_NAV = [
   { to: "/", label: "Marketplace", end: true },
-  { to: "/membership", label: "Become a member" },
+  { to: "/track", label: "Track order" },
+  { to: "/membership", label: "Chase card benefits" },
 ];
 
 const MEMBER_NAV = [
   { to: "/", label: "Marketplace", end: true },
-  { to: "/offers", label: "Exclusive Offers" },
+  { to: "/offers", label: "Chase Offers" },
   { to: "/rewards", label: "Rewards" },
   { to: "/orders", label: "Orders" },
   { to: "/account", label: "Account" },
@@ -44,7 +45,7 @@ const MEMBER_NAV = [
 
 export default function StoreHeader() {
   const { user, logout } = useAuth();
-  const { info, eligible, refresh } = useMember();
+  const { info, eligible, chase, refresh } = useMember();
   const location = useLocation();
   const { count, bumpKey } = useCart();
   const navigate = useNavigate();
@@ -67,6 +68,8 @@ export default function StoreHeader() {
   const card = info?.member?.primary_card;
   const points = info?.member?.rewards_balance ?? 0;
   const agentPay = info?.member?.agent_pay?.find((a) => a.card_account_id === card?.account_id);
+  // Issuer and network are separate (CH-1): "Citi Mastercard", "Chase Visa"; Amex is both.
+  const cardLabel = card ? (card.issuer_code === card.network_code ? card.issuer : `${card.issuer} ${card.network}`) : "";
 
   useEffect(() => { if (accountOpen) void refresh(); }, [accountOpen, refresh]);   // fresh points on open
   useEffect(() => {
@@ -96,9 +99,11 @@ export default function StoreHeader() {
           {menuOpen ? <X size={20} /> : <Menu size={20} />}
         </button>
         <Wordmark />
-        <span className="hidden sm:inline-flex items-center rounded-full border border-gold/50 bg-gold-soft px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-gold">
-          Cardmember
-        </span>
+        {chase && (
+          <span className="hidden sm:inline-flex items-center rounded-full border border-gold/50 bg-gold-soft px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-gold">
+            Chase benefits
+          </span>
+        )}
 
         <div className="flex-1" />
 
@@ -111,11 +116,11 @@ export default function StoreHeader() {
         )}
 
         {eligible && card && (
-          <Link to="/account" title="Your eligible card and rewards"
+          <Link to="/account" title="Your card and rewards"
             className="hidden lg:flex items-center gap-2.5 h-10 pl-2 pr-3 rounded-full border border-line hover:border-line-strong shrink-0">
             <span className="w-7 h-7 rounded-full bg-navy text-white grid place-items-center"><CreditCard size={14} /></span>
             <span className="leading-tight">
-              <span className="block text-[12px] font-semibold whitespace-nowrap">{card.network} •• {card.last4}</span>
+              <span className="block text-[12px] font-semibold whitespace-nowrap">{cardLabel} •• {card.last4}</span>
               <span className="block text-[11px] text-muted whitespace-nowrap">
                 {points.toLocaleString()} pts{agentPay?.status === "ACTIVE" ? " · agent pay on" : ""}
               </span>
@@ -127,7 +132,7 @@ export default function StoreHeader() {
           {dark ? <Sun size={18} /> : <Moon size={18} />}
         </button>
 
-        {eligible && (
+        {(
           <Link to="/cart" className="relative p-2 rounded-full text-ink hover:bg-panel" aria-label={`Cart, ${count} items`}>
             <ShoppingBag size={20} />
             {count > 0 && (
@@ -157,7 +162,7 @@ export default function StoreHeader() {
               <div className="absolute right-0 mt-2 w-64 rounded-2xl border border-line bg-canvas shadow-float p-1.5">
                 <div className="px-3 py-2.5 border-b border-line mb-1">
                   <p className="text-sm font-semibold">{user.name}</p>
-                  <p className={cx("text-xs flex items-center gap-1 mt-0.5", eligible ? "text-good" : "text-bad")}>
+                  <p className={cx("text-xs flex items-center gap-1 mt-0.5", info.credit_card_holder ? "text-good" : "text-gold")}>
                     <BadgeCheck size={13} /> {info.member?.status}
                   </p>
                   {eligible && card && (
@@ -184,7 +189,7 @@ export default function StoreHeader() {
         )}
       </div>
 
-      {/* Member navigation + departments (desktop). Non-members get the marketplace + a membership link. */}
+      {/* Customer navigation + departments (desktop). Visitors get the marketplace, tracking and Chase benefits info. */}
       {(
         <div className="hidden lg:block border-t border-line">
           <div className="mx-auto max-w-[1400px] px-6 flex items-center gap-6">
@@ -206,7 +211,7 @@ export default function StoreHeader() {
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search the marketplace" className="w-full bg-transparent text-sm outline-none" />
           </form>
           {card && (
-            <p className="mt-3 text-xs text-muted">{card.network} •• {card.last4} · {points.toLocaleString()} pts
+            <p className="mt-3 text-xs text-muted">{cardLabel} •• {card.last4} · {points.toLocaleString()} pts
               {agentPay?.status === "ACTIVE" ? " · agent pay on" : ""}</p>
           )}
           <nav className="flex flex-col mt-2">
@@ -218,7 +223,7 @@ export default function StoreHeader() {
               <NavLink key={d.slug} to={`/c/${d.slug}`}
                 className={({ isActive }) => cx("py-2.5 border-b border-line text-[14px] pl-3", isActive ? "font-semibold" : "text-muted")}>{d.label}</NavLink>
             ))}
-            {eligible && <Link to="/track" className="py-3 border-b border-line text-[15px] text-ink-soft">Track order</Link>}
+            {eligible && <Link to="/track" className="py-3 border-b border-line text-[15px] text-ink-soft">Track order</Link>}{/* visitors: in PUBLIC_NAV */}
             {info?.signed_in
               ? <button onClick={signOut} className="py-3 text-left text-[15px] text-ink-soft">Sign out</button>
               : <Link to="/login" className="py-3 text-[15px] font-medium">Sign in or create an account</Link>}

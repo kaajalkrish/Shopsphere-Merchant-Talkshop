@@ -22,7 +22,7 @@ from backend.vic.common import MERCHANT_ID, VicError, new_ref, now, sha256, shor
 CREDENTIAL_TTL = timedelta(minutes=5)
 
 CONTROL_NAMES = [
-    "Cardmember session + eligibility", "Active Visa card (fixture)", "Active agent token",
+    "Customer session + access", "Active agent-pay capable Visa card (fixture)", "Active agent token",
     "Instruction authenticated", "Merchant matches", "Checkout id + hash match", "Amount + currency match",
     "Instruction not expired", "Transaction count + spending scope", "Not cancelled or consumed",
     "No duplicate payment attempt", "Inventory + final checkout state",
@@ -43,9 +43,9 @@ def run_controls(db: Session, user, instr: PaymentInstruction, co: Checkout, sna
     acct = db.query(CardAccount).filter_by(user_id=user.user_id, payment_method_id=co.payment_method_id).first()
     token = enrollment.active_for_payment_method(db, user.user_id, co.payment_method_id)
     steps = [
-        lambda: check(eligibility.check(db, user) is None and instr.user_id == user.user_id, "NOT_ELIGIBLE"),
+        lambda: check(eligibility.check_access(db, user) is None and instr.user_id == user.user_id, "NOT_ELIGIBLE"),
         lambda: check(acct is not None and acct.network == "Visa" and acct.status == "active"
-                      and acct.account_type == "credit_card", "VISA_CARD_INACTIVE"),
+                      and acct.account_type == "credit_card" and bool(acct.agent_pay_capable), "VISA_CARD_INACTIVE"),
         lambda: check(token is not None and token.agent_token_ref == instr.agent_token_ref, "AGENT_TOKEN_INACTIVE"),
         lambda: check(instr.status == "AUTHENTICATED" and instr.authenticated_at is not None,
                       "INSTRUCTION_NOT_AUTHENTICATED"),

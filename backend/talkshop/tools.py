@@ -103,9 +103,13 @@ def update_checkout(user_id: str, checkout_id: str, **changes) -> dict:
         return checkout_service.snapshot(db, checkout_service.update_checkout(db, user_id, checkout_id, **changes))
 
 
-def cancel_checkout(user_id: str, checkout_id: str) -> dict:
-    with _db() as db:
-        return checkout_service.snapshot(db, checkout_service.cancel_checkout(db, user_id, checkout_id))
+async def cancel_checkout(user: CurrentUser, checkout_id: str) -> dict:
+    """CH-8: cancel before paying — recorded, and a pending provider session released."""
+    return await payment_service.cancel(user, checkout_id)
+
+
+def record_approval_cancelled(user_id: str, checkout_id: str, reason: str) -> None:
+    payment_service.record_approval_cancelled(user_id, checkout_id, reason)
 
 
 def track_order(order_id: str, email: str) -> Optional[dict]:
@@ -114,6 +118,24 @@ def track_order(order_id: str, email: str) -> Optional[dict]:
     with _db() as db:
         order = order_service.find_for_tracking(db, order_id, email)
         return order_service.tracking_view(db, order) if order else None
+
+
+async def complete_provider(user: CurrentUser, checkout_id: str, session_id: str) -> dict:
+    """CH-6: verify the payment provider's result server-to-server and place the order.
+    Like confirm_and_pay, never offered to the LLM."""
+    return await payment_service.complete_provider(user, checkout_id, session_id)
+
+
+async def abandon_provider(user: CurrentUser, checkout_id: str, session_id: str) -> dict:
+    """The shopper closed the secure payment sheet: release the session, back to review."""
+    return await payment_service.abandon_provider(user, checkout_id, session_id)
+
+
+def has_chase_benefits(user_id: str) -> bool:
+    """CH-3: an eligible Chase credit card is linked (Chase offers, 2x points with it)."""
+    from backend.shop.eligibility import has_chase_relationship
+    with _db() as db:
+        return has_chase_relationship(db, user_id)
 
 
 def points_balance(user_id: str) -> int:
@@ -150,10 +172,15 @@ def own_order(user_id: str, order_id: str) -> Optional[dict]:
 
 
 async def confirm_and_pay(user: CurrentUser, checkout_id: str, consent_mode: str = "button",
-                          instruction_id: Optional[str] = None) -> dict:
+                          instruction_id: Optional[str] = None, scope: Optional[dict] = None,
+                          return_url: Optional[str] = None) -> dict:
     """Only ever called for the member's Approve-and-pay action (tapped, or the
     review card's countdown on the standard path). On the Visa path it also
     needs the member's AUTHENTICATED instruction (simulated passkey, done by
     the panel directly with ShopSphere). Never by the LLM."""
+    scope = scope or {}
     return await payment_service.confirm(user, checkout_id, consent=True, consent_mode=consent_mode,
-                                         instruction_id=instruction_id)
+                                         instruction_id=instruction_id, action="PAY",
+                                         checkout_version=scope.get("checkout_version"),
+                                         final_amount=scope.get("final_amount"), currency=scope.get("currency"),
+                                         return_url=return_url)

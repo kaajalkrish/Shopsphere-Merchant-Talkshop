@@ -21,6 +21,7 @@ from backend.db.schema import (
 )
 
 from backend.db.config import DB_PATH  # noqa: E402  (single source; overridable in tests)
+from backend.shop.cards import normalize_issuer  # noqa: E402
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 CATALOG_FILE = DATA_DIR / "shopsphere_catalog.json"
 # Colour photos live in the frontend's public folder and are served at /catalog/...
@@ -35,19 +36,22 @@ def get_engine(db_path: Path = DB_PATH):
     return create_engine(f"sqlite:///{db_path}", echo=False)
 
 
-def _ensure_column(engine, table: str, column: str, ddl: str) -> None:
+def _ensure_column(engine, table: str, column: str, ddl: str) -> bool:
     """
     Defensive migration: Base.metadata.create_all() never ALTERs an existing
     table, so a dev DB created before a column existed won't have it without this.
+    Returns True when the column was just added.
     """
     inspector = inspect(engine)
     if table not in inspector.get_table_names():
-        return
+        return False
     columns = {c["name"] for c in inspector.get_columns(table)}
     if column not in columns:
         with engine.connect() as conn:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
             conn.commit()
+        return True
+    return False
 
 
 def init_db(db_path: Path = DB_PATH):
@@ -99,6 +103,43 @@ def init_db(db_path: Path = DB_PATH):
                      ("bonus_points", "bonus_points INTEGER"), ("cashback", "cashback FLOAT"),
                      ("payment_path", "payment_path VARCHAR(20)")]:
         _ensure_column(engine, "orders", col, ddl)
+    # CH-4: checkout version + benefits; consent scope on authorizations and instructions
+    _ensure_column(engine, "checkouts", "version", "version INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "checkouts", "benefits_json", "benefits_json TEXT")
+    for col, ddl in [("checkout_version", "checkout_version INTEGER"), ("action", "action VARCHAR(10)"),
+                     ("consent_status", "consent_status VARCHAR(20)")]:
+        _ensure_column(engine, "payment_authorizations", col, ddl)
+    _ensure_column(engine, "payment_instructions", "checkout_version", "checkout_version INTEGER")
+    # Secure Payment Sheet, Phase 3: tokenization on the provider's sessions
+    _ensure_column(engine, "provider_payment_sessions", "verification_required", "verification_required BOOLEAN")
+    _ensure_column(engine, "provider_payment_sessions", "tokenized_at", "tokenized_at DATETIME")
+    # Phases 4–6: verification challenge + saved-card display metadata
+    for col, ddl in [("challenge_hash", "challenge_hash VARCHAR(64)"), ("challenge_expires_at", "challenge_expires_at DATETIME"),
+                     ("verification_attempts", "verification_attempts INTEGER NOT NULL DEFAULT 0"),
+                     ("verified_at", "verified_at DATETIME"), ("cardholder_display", "cardholder_display VARCHAR(80)"),
+                     ("card_exp_month", "card_exp_month INTEGER"), ("card_exp_year", "card_exp_year INTEGER")]:
+        _ensure_column(engine, "provider_payment_sessions", col, ddl)
+    # CH-6: provider handoff on checkouts
+    _ensure_column(engine, "checkouts", "provider_session_id", "provider_session_id VARCHAR(64)")
+    _ensure_column(engine, "checkouts", "pending_payment_ref", "pending_payment_ref VARCHAR(60)")
+    # CH-3: offer eligibility rules (Chase-exclusive, card-bound, enrollment, dates)
+    for col, ddl in [("requires_issuer", "requires_issuer VARCHAR(30)"),
+                     ("requires_payment_with_issuer", "requires_payment_with_issuer BOOLEAN NOT NULL DEFAULT 0"),
+                     ("requires_network", "requires_network VARCHAR(20)"),
+                     ("requires_payment_path", "requires_payment_path VARCHAR(20)"),
+                     ("requires_enrollment", "requires_enrollment BOOLEAN NOT NULL DEFAULT 0"),
+                     ("starts_at", "starts_at DATETIME"), ("ends_at", "ends_at DATETIME")]:
+        _ensure_column(engine, "member_offers", col, ddl)
+    # CH-9: agent payments are a Visa capability flag on the card, not "is a Chase card"
+    if _ensure_column(engine, "card_accounts", "agent_pay_capable", "agent_pay_capable BOOLEAN NOT NULL DEFAULT 0"):
+        with engine.connect() as conn:          # older demo DBs: the Chase Visa cards that already supported it
+            conn.execute(text("UPDATE card_accounts SET agent_pay_capable = 1 WHERE issuer = 'Chase' AND "
+                              "network = 'Visa' AND account_type = 'credit_card'"))
+            conn.commit()
+    # CH-1: issuer is separate from the network on every payment method
+    for col, ddl in [("issuer", "issuer VARCHAR(30)"), ("status", "status VARCHAR(20) DEFAULT 'active'"),
+                     ("source", "source VARCHAR(20)")]:
+        _ensure_column(engine, "payment_methods", col, ddl)
     return engine
 
 
@@ -151,10 +192,10 @@ def seed_demo_profile(session: Session):
     if not session.query(PaymentMethod).filter_by(user_id=DEMO_USER_ID).first():
         session.add_all([
             PaymentMethod(payment_method_id="PM_VISA_4821", user_id=DEMO_USER_ID, brand="Visa", last4="4821",
-                          exp_month=8, exp_year=2029, cardholder_name="Kaajal",
+                          issuer="CHASE", source="seeded", exp_month=8, exp_year=2029, cardholder_name="Kaajal",
                           token_ref=f"tok_{secrets.token_urlsafe(18)}", behaviour="approve", is_default=True),
             PaymentMethod(payment_method_id="PM_MC_0019", user_id=DEMO_USER_ID, brand="Mastercard", last4="0019",
-                          exp_month=11, exp_year=2028, cardholder_name="Kaajal",
+                          issuer="CHASE", source="seeded", exp_month=11, exp_year=2028, cardholder_name="Kaajal",
                           token_ref=f"tok_{secrets.token_urlsafe(18)}", behaviour="decline", is_default=False),
         ])
     session.commit()
@@ -177,7 +218,8 @@ def seed_demo_loyalty(session: Session):
 # Part 2 (Phase 13): demo personas. Every identity, account and card here is a
 # simulated fixture — no real Chase or Visa data, masked card metadata only.
 PERSONAS = [
-    # user_id, name, email, accounts [(account_id, type, network, last4, payment_method_id, behaviour)], points
+    # user_id, name, email, accounts [(account_id, type, network, last4, payment_method_id, behaviour
+    #                                  [, issuer, product name])], points. Issuer defaults to Chase.
     ("USR001", "Kaajal", DEMO_EMAIL, [
         ("ACCT_A_VISA", "credit_card", "Visa", "4821", "PM_VISA_4821", "approve"),
         ("ACCT_A_MC", "credit_card", "Mastercard", "0019", "PM_MC_0019", "decline"),
@@ -191,15 +233,33 @@ PERSONAS = [
     ("USR004", "Elena", "elena@shopsphere.demo", [
         ("ACCT_E_VISA", "credit_card", "Visa", "4002", "PM_VISA_4002", "approve"),
     ], 800),
+    # CH-2: general credit-card holders. ShopSphere is for every credit-card holder;
+    # Chase status only adds Chase benefits. (All simulated fixtures.)
+    ("USR005", "Dana Brooks", "dana@shopsphere.demo", [            # F · Scenario 1 (CARD_002)
+        ("ACCT_F_CITI_MC", "credit_card", "Mastercard", "5678", "PM_CITI_MC_5678", "approve",
+         "Citi", "Citi Mastercard credit card"),
+    ], 1500),
+    ("USR006", "Ravi Menon", "ravi@shopsphere.demo", [             # G · Scenario 1 (CARD_003)
+        ("ACCT_G_AMEX", "credit_card", "Amex", "9012", "PM_AMEX_9012", "approve",
+         "American Express", "American Express Card"),
+    ], 600),
+    ("USR007", "Chris Park", "chris@shopsphere.demo", [             # H · Scenario 2 (CARD_001)
+        ("ACCT_H_VISA", "credit_card", "Visa", "1234", "PM_CHASE_VISA_1234", "approve"),
+        ("ACCT_H_CITI_MC", "credit_card", "Mastercard", "5678", "PM_H_CITI_MC_5678", "approve",
+         "Citi", "Citi Mastercard credit card"),                    # to show a Chase benefit removed on a card switch
+    ], 9000),
 ]
 PERSONA_ADDRESSES = {
     "USR002": ("ADDR_HOME_USR002", "Marcus", "915 Larkspur Avenue", None, "Denver", "CO", "80203"),
     "USR004": ("ADDR_HOME_USR004", "Elena", "77 Harbor View Road", "Unit 12", "Seattle", "WA", "98109"),
+    "USR005": ("ADDR_HOME_USR005", "Dana Brooks", "402 Maple Grove Drive", None, "Chicago", "IL", "60614"),
+    "USR006": ("ADDR_HOME_USR006", "Ravi Menon", "18 Orchard Street", "Apt 3C", "Jersey City", "NJ", "07302"),
+    "USR007": ("ADDR_HOME_USR007", "Chris Park", "250 Bayshore Boulevard", None, "San Diego", "CA", "92101"),
 }
 
 
 def seed_personas(session: Session):
-    """Personas A–E (D, the guest, is simply not signed in). Inserts only
+    """Personas A–H (D, the guest, is simply not signed in). Inserts only
     what's missing, so an existing demo database keeps its history."""
     for user_id, name, email, accts, points in PERSONAS:
         if not session.query(User).filter_by(user_id=user_id).first():
@@ -216,19 +276,27 @@ def seed_personas(session: Session):
                                                        PaymentMethod.token_ref.like("tok_demo_%")):
             pm.token_ref = f"tok_{secrets.token_urlsafe(18)}"
         first_seed = not session.query(CardAccount).filter_by(user_id=user_id).first()
-        for i, (account_id, kind, network, last4, pm_id, behaviour) in enumerate(accts):
+        for i, (account_id, kind, network, last4, pm_id, behaviour, *extra) in enumerate(accts):
+            issuer = extra[0] if extra else "Chase"
             if session.query(CardAccount).filter_by(account_id=account_id).first():
                 continue
             if pm_id and not session.query(PaymentMethod).filter_by(payment_method_id=pm_id).first():
                 session.add(PaymentMethod(payment_method_id=pm_id, user_id=user_id, brand=network, last4=last4,
-                                          exp_month=9, exp_year=2030, cardholder_name=name,
+                                          issuer=normalize_issuer(issuer), source="seeded", exp_month=9,
+                                          exp_year=2030, cardholder_name=name,
                                           token_ref=f"tok_{secrets.token_urlsafe(18)}", behaviour=behaviour,
                                           is_default=i == 0))
             is_card = kind == "credit_card"
+            product = extra[1] if len(extra) > 1 else (f"{issuer} {network} credit card" if is_card
+                                                       else f"{issuer} checking account")
             session.add(CardAccount(
-                account_id=account_id, user_id=user_id, issuer="Chase", account_type=kind,
-                product_name=f"Chase {network} credit card" if is_card else "Chase checking account",
-                network=network, last4=last4, status="active", marketplace_eligible=is_card,
+                account_id=account_id, user_id=user_id, issuer=issuer, account_type=kind,
+                product_name=product,
+                # legacy column: "eligible Chase credit card" (the source of Chase benefits), never access
+                network=network, last4=last4, status="active",
+                marketplace_eligible=is_card and normalize_issuer(issuer) == "CHASE",
+                # CH-9 (decision Q6): in the fixtures only Chase Visa cards support agent payments
+                agent_pay_capable=is_card and network == "Visa" and normalize_issuer(issuer) == "CHASE",
                 payment_method_id=pm_id, credit_limit=8000.0 if is_card else None,
                 available_credit=8000.0 if is_card else None))
         if first_seed and points:
@@ -239,21 +307,28 @@ def seed_personas(session: Session):
             lp.balance = (lp.balance or 0) + points
             lp.lifetime_points = (lp.lifetime_points or 0) + points
             session.add(LoyaltyTransaction(transaction_id=f"LTX_WELCOME_{user_id}", user_id=user_id,
-                                           points_earned=points, reason="Cardmember welcome bonus (demo)"))
+                                           points_earned=points, reason="Welcome bonus (demo)"))
     session.commit()
 
 
 def seed_agent_tokens(session: Session):
-    """Persona A starts enrolled (ACTIVE simulated agent token); Persona E doesn't."""
+    """Personas A and H start enrolled (ACTIVE simulated agent token); Persona E doesn't."""
     from backend.vic.enrollment import seed_active
-    if session.query(CardAccount).filter_by(account_id="ACCT_A_VISA").first():
-        seed_active(session, "USR001", "ACCT_A_VISA")
+    for user_id, account_id in (("USR001", "ACCT_A_VISA"), ("USR007", "ACCT_H_VISA")):
+        if session.query(CardAccount).filter_by(account_id=account_id).first():
+            seed_active(session, user_id, account_id)
 
 
 def seed_issuer_directory(session: Session):
     """The simulated Chase cardholder directory used by cardmember sign-up."""
     from backend.shop.cardholder_verification import seed
     seed(session)
+
+
+def seed_card_metadata(session: Session):
+    """CH-1: payment methods saved before issuer/status/source existed get them filled in."""
+    from backend.shop.cards import backfill
+    backfill(session)
 
 
 def seed_offers(session: Session):
@@ -356,6 +431,7 @@ def run(db_path: Path = DB_PATH):
         seed_issuer_directory(session)
         seed_merchants(session)
         seed_products(session)
+        seed_card_metadata(session)
     print(f"Database initialized at {db_path}")
 
 

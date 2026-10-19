@@ -1,7 +1,7 @@
 /**
- * The signed-in cardmember (Part 2). The server decides eligibility
- * (GET /api/member); the UI only reflects it — every marketplace API enforces
- * it again on its own.
+ * Who the shopper is (GET /api/member). CH-2: "eligible" means a signed-in
+ * ShopSphere customer (any card issuer); "chase" means Chase-exclusive benefits
+ * apply. The server decides both; every API enforces them again on its own.
  */
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { useAuth } from "../auth/AuthContext";
@@ -10,7 +10,12 @@ import { member as memberApi, type MemberInfo } from "../api/member";
 interface MemberContextValue {
   info: MemberInfo | null;
   loading: boolean;
+  /** Signed-in ShopSphere customer (checkout access). */
   eligible: boolean;
+  /** Chase credit-card holder: Chase-exclusive offers apply. */
+  chase: boolean;
+  /** Has an active credit card on file. */
+  cardHolder: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -39,7 +44,8 @@ export function MemberProvider({ children }: { children: ReactNode }) {
   }, [user?.user_id, authLoading]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <MemberContext.Provider value={{ info, loading, eligible: !!info?.eligible, refresh }}>
+    <MemberContext.Provider value={{ info, loading, eligible: !!info?.eligible, chase: !!info?.chase_benefits,
+      cardHolder: !!info?.credit_card_holder, refresh }}>
       {children}
     </MemberContext.Provider>
   );

@@ -134,7 +134,7 @@ export default function CartPage() {
           <Button size="lg" onClick={checkout} loading={checkingOut} disabled={!chosen.length || blocked}>
             {chosen.length ? `Checkout selected (${chosen.length})` : "Select items to check out"}
           </Button>
-          {!isCustomer && <p className="text-center text-xs text-muted -mt-1">At checkout you can log in, create an account, or continue as a guest. Your cart is saved.</p>}
+          {!isCustomer && <p className="text-center text-xs text-muted -mt-1">At checkout, sign in or create a ShopSphere account. Your cart is saved.</p>}
           <Link to="/" className="text-center text-sm text-muted hover:text-ink">Continue shopping</Link>
         </aside>
       </div>

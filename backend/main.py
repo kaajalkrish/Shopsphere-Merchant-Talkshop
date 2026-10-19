@@ -54,6 +54,13 @@ app.include_router(talkshop.router)
 app.include_router(member.router)
 app.include_router(vic.router)
 
+# CH-6: in a one-process demo the mock gateway / Simulated Secure Payment Provider is
+# also reachable at /psp, so the customer's browser can open the provider's hosted page
+# (http://localhost:8000/psp/hosted/…). Run it as its own service (MOCK_GATEWAY_URL) to
+# give the provider its own origin.
+from backend.gateway.app import app as _gateway_app  # noqa: E402
+app.mount("/psp", _gateway_app)
+
 
 @app.get("/")
 def health():

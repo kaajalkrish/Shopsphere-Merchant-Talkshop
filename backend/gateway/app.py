@@ -9,6 +9,7 @@ and start the backend with MOCK_GATEWAY_URL=http://127.0.0.1:8100.
   GET  /health
   POST /v1/authorizations                 Idempotency-Key + X-Gateway-Key headers
   POST /v1/authorizations/{gateway_ref}/void
+  /v1/payment_sessions… + /hosted/{id}    Simulated Secure Payment Provider (CH-6, backend/gateway/provider.py)
 
 Simplification (demo): the simulated network and issuer read the same local
 SQLite database as ShopSphere, standing in for their own systems.
@@ -31,6 +32,10 @@ GATEWAY_KEY = os.getenv("MOCK_GATEWAY_KEY", "shopsphere-demo-merchant-key")
 ACTOR = "Mock gateway / PSP"
 
 app = FastAPI(title="Mock payment gateway (SIMULATED)", version="1.0.0")
+
+# CH-6: the Simulated Secure Payment Provider (hosted page + payment sessions) is part of this service
+from backend.gateway.provider import router as provider_router  # noqa: E402
+app.include_router(provider_router)
 
 
 class Instrument(BaseModel):

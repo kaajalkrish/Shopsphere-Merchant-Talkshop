@@ -84,12 +84,13 @@ def create(db: Session, user_id: str, checkout_id: str, consent_mode: str = "but
     instr = PaymentInstruction(
         instruction_id=new_ref("pin"), user_id=user_id, agent_token_ref=token.agent_token_ref,
         agent_id=TALKSHOP_AGENT_ID, merchant_id=MERCHANT_ID, checkout_id=co.checkout_id,
-        checkout_hash=co.checkout_hash, amount=co.total, currency=co.currency, max_transactions=1,
-        status="PENDING_AUTHENTICATION", consent_mode=consent_mode if consent_mode in ("button", "typed", "auto_countdown") else "button",
+        checkout_hash=co.checkout_hash, checkout_version=co.version, amount=co.total, currency=co.currency,
+        max_transactions=1,
+        status="PENDING_AUTHENTICATION", consent_mode=consent_mode if consent_mode in ("button", "typed") else "button",
         lifecycle_state="CHECKOUT_CREATED", expires_at=now() + INSTRUCTION_TTL)
     db.add(instr)
     card = path["card"]
-    log_event(db, instr.instruction_id, user_id, "CARD_LINKED", f"Chase Visa credit ending {card['last4']} (fixture)")
+    log_event(db, instr.instruction_id, user_id, "CARD_LINKED", f"{card.get('display') or 'Visa card'} (fixture)")
     log_event(db, instr.instruction_id, user_id, "AGENT_TOKEN_ACTIVE", f"Agent token {short(token.agent_token_ref)}")
     log_event(db, instr.instruction_id, user_id, "CHECKOUT_CREATED",
               f"{co.checkout_id}: {co.currency} {co.total:.2f} at ShopSphere")

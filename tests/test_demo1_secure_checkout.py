@@ -16,6 +16,7 @@ from backend.payment import mock_processor
 from backend.shop import orders as order_service
 from backend.talkshop import brain
 from backend.talkshop import state as talk_state
+from tests.conftest import add_card
 
 SPEC_REQUEST = "I need running shoes under $150 for everyday running."
 CARD = "4242 4242 4242 4242"
@@ -105,16 +106,16 @@ def test_address_then_card_resume_to_review_and_pay(client, auth_headers, llm):
     assert of(ev, "checkout_details_needed")[0]["needs"] == {"guest": False, "address": False, "payment": True}
     assert "Address saved" in of(ev, "message")[0]["text"] and stage(ev) == "CHECKOUT_DETAILS"
 
-    card = client.post("/api/me/payment-methods", json=VISA, headers=auth_headers).json()
+    card = add_card(client, auth_headers, VISA).json()
     assert not {"number", "cvc", "token_ref"} & set(card) and card["display"] == "Visa •••• 4242"
     ev = turn(client, auth_headers, sid, action={"type": "details_added", "payment_method_id": card["payment_method_id"],
                                                  "label": f"Card added · {card['display']}"})
     co = of(ev, "checkout_ready")[0]["checkout"]
     assert co["address"]["city"] == "Austin" and co["payment_method"]["display"] == "Visa •••• 4242"
-    assert (co["subtotal"], co["tax"], co["total"]) == (129.0, 9.05, 118.7) and stage(ev) == "AWAITING_CONSENT"
+    assert (co["subtotal"], co["tax"], co["total"]) == (129.0, 10.64, 139.64) and stage(ev) == "AWAITING_CONSENT"  # CH-3: card typed in (issuer unknown) → no Chase offer; Demo 1 spec amounts
 
     ev = turn(client, auth_headers, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
-    assert of(ev, "order_confirmed")[0]["order"]["total"] == 118.7
+    assert of(ev, "order_confirmed")[0]["order"]["total"] == 139.64
     s = session_of(client, auth_headers, sid)
     assert_no_raw_card(s.transcript, s.history, llm)
 
@@ -123,12 +124,14 @@ def test_only_the_card_missing(client, auth_headers):
     client.post("/api/me/addresses", json=HOME, headers=auth_headers)
     _, ev = to_checkout(client, auth_headers)
     assert of(ev, "checkout_details_needed")[0]["needs"] == {"guest": False, "address": False, "payment": True}
-    assert "Secure Payment" in of(ev, "message")[0]["text"]
+    text = of(ev, "message")[0]["text"]           # CH-2: no card numbers taken in ShopSphere
+    assert "credit-card holders" in text and "Simulated Secure Payment Provider" in text
+    assert "never see the card number" in text                  # CH-6: the card goes to the provider's page
 
 
 def test_both_saved_goes_straight_to_review(client, auth_headers):
     client.post("/api/me/addresses", json=HOME, headers=auth_headers)
-    client.post("/api/me/payment-methods", json=VISA, headers=auth_headers)
+    add_card(client, auth_headers, VISA)
     _, ev = to_checkout(client, auth_headers)
     assert of(ev, "checkout_ready") and not of(ev, "checkout_details_needed") and stage(ev) == "AWAITING_CONSENT"
 
@@ -200,19 +203,18 @@ def test_address_is_validated_by_shopsphere(client, auth_headers, change, code):
     assert r.status_code >= 400 and r.json()["detail"]["code"] == code
 
 
-@pytest.mark.parametrize("change,code", [
-    ({"number": "4242 4242 4242 4241"}, "INVALID_CARD_NUMBER"), ({"exp_year": 2020}, "CARD_EXPIRED"),
-    ({"cvc": "12"}, "INVALID_CVC"),
-])
-def test_tokenization_failures_are_reported(client, auth_headers, change, code):
+@pytest.mark.parametrize("change", [{}, {"number": "4242 4242 4242 4241"}, {"exp_year": 2020}, {"cvc": "12"}])
+def test_shopsphere_never_takes_card_numbers(client, auth_headers, change):
+    """CH-6: any card number sent to ShopSphere is refused unread (the card is given on
+    the payment provider's own page), and nothing of it comes back."""
     r = client.post("/api/me/payment-methods", json={**VISA, **change}, headers=auth_headers)
-    assert r.status_code >= 400 and r.json()["detail"]["code"] == code
+    assert r.status_code == 410 and r.json()["detail"]["code"] == "PAN_NOT_ACCEPTED"
     assert_no_raw_card(r.json())
 
 
 def test_order_failure_after_authorization_releases_the_payment(client, auth_headers, monkeypatch):
     client.post("/api/me/addresses", json=HOME, headers=auth_headers)
-    client.post("/api/me/payment-methods", json=VISA, headers=auth_headers)
+    add_card(client, auth_headers, VISA)
     sid, ev = to_checkout(client, auth_headers)
     co_id = of(ev, "checkout_ready")[0]["checkout"]["checkout_id"]
     real = order_service.finalize

@@ -1,9 +1,10 @@
 """
 Customer profile — saved shipping addresses and saved cards.
 
-Cards are stored masked only: brand, last 4, expiry and a processor token
-reference. The full number and CVC are validated here and then discarded;
-nothing downstream (checkout, payment, Talkshop) ever sees them.
+Cards are stored masked only: network, last 4, expiry and an opaque token
+reference. CH-6: ShopSphere never receives a card number or CVC at all — new
+cards are given on the (simulated) payment provider's own page, and only a card
+the customer chose to save there is kept, as the provider's token.
 """
 import re
 import uuid
@@ -13,6 +14,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from backend.db.schema import Address, PaymentMethod
+from backend.shop.cards import payment_card_fields
 
 
 class ProfileError(Exception):
@@ -31,11 +33,14 @@ def address_dict(a: Address) -> dict:
 
 
 def card_dict(c: PaymentMethod) -> dict:
+    """Masked card view. CH-1 adds issuer and network as separate codes (PaymentCard
+    fields from backend/shop/cards.py); "brand" stays for older callers. No token."""
     return {
         "payment_method_id": c.payment_method_id, "brand": c.brand, "last4": c.last4,
         "exp_month": c.exp_month, "exp_year": c.exp_year, "cardholder_name": c.cardholder_name,
         "is_default": bool(c.is_default), "display": f"{c.brand} •••• {c.last4}",
         "saved": c.saved is not False,
+        **payment_card_fields(c),
     }
 
 
@@ -105,55 +110,26 @@ def add_address(db: Session, user_id: str, *, full_name: str, line1: str, city: 
     return a
 
 
-def _luhn_ok(number: str) -> bool:
-    total, parity = 0, len(number) % 2
-    for i, ch in enumerate(number):
-        d = int(ch)
-        if i % 2 == parity:
-            d = d * 2 - 9 if d > 4 else d * 2
-        total += d
-    return total % 10 == 0
-
-
-def _brand(number: str) -> str:
-    if number.startswith("4"):
-        return "Visa"
-    if re.match(r"5[1-5]|2[2-7]", number):
-        return "Mastercard"
-    if re.match(r"3[47]", number):
-        return "Amex"
-    if number.startswith("6"):
-        return "Discover"
-    return "Card"
-
-
-def add_card(db: Session, user_id: str, *, number: str, exp_month: int, exp_year: int, cvc: str,
-             cardholder_name: str, make_default: bool = False, save: bool = True) -> PaymentMethod:
-    """Tokenize a card. save=False: used for one order only, never listed as a
-    saved card (guests, or a customer who didn't tick "Save this card")."""
-    digits = re.sub(r"\D", "", number or "")
-    if not 13 <= len(digits) <= 19 or not _luhn_ok(digits):
-        raise ProfileError("INVALID_CARD_NUMBER", "That card number doesn't look right.")
-    if exp_year < 100:
-        exp_year += 2000
-    now = datetime.now(timezone.utc)
-    if not 1 <= exp_month <= 12 or (exp_year, exp_month) < (now.year, now.month):
-        raise ProfileError("CARD_EXPIRED", "That card has expired or the expiry date is invalid.")
-    if not re.fullmatch(r"\d{3,4}", cvc or ""):
-        raise ProfileError("INVALID_CVC", "CVC should be 3 or 4 digits.")
-    if not (cardholder_name or "").strip():
-        raise ProfileError("MISSING_FIELD", "Please enter the name on the card.")
-    first = save and not list_cards(db, user_id)
-    make_default = save and (make_default or first)
+def save_provider_card(db: Session, user_id: str, *, network: str, last4: str, payment_token: str,
+                       issuer: str = "UNKNOWN", exp_month: int = 12, exp_year: Optional[int] = None,
+                       cardholder_name: Optional[str] = None, make_default: bool = False) -> PaymentMethod:
+    """CH-6: keep a card the customer chose to save on the payment provider's page — as
+    the provider's OPAQUE token plus the network and last 4 digits. No card number or
+    CVC ever reaches ShopSphere, so there is nothing else to store. The provider also hands
+    over the expiry and cardholder name for display, and only when the customer ticked
+    "save"; without them the expiry is a display placeholder."""
+    from backend.shop.cards import network_display, normalize_network
+    first = not list_cards(db, user_id)
+    make_default = make_default or first
     if make_default:
         db.query(PaymentMethod).filter_by(user_id=user_id).update({"is_default": False})
     card = PaymentMethod(
         payment_method_id=f"PM_{uuid.uuid4().hex[:10].upper()}", user_id=user_id,
-        brand=_brand(digits), last4=digits[-4:], exp_month=exp_month, exp_year=exp_year,
-        cardholder_name=cardholder_name.strip(),
-        token_ref=f"tok_{uuid.uuid4().hex}",    # stand-in for the processor's vault token
-        behaviour="approve", is_default=make_default, saved=save,
+        brand=network_display(normalize_network(network)), last4=last4, exp_month=exp_month,
+        exp_year=exp_year or datetime.now(timezone.utc).year + 4, cardholder_name=cardholder_name,
+        token_ref=payment_token, behaviour="approve", is_default=make_default, saved=True,
+        issuer=issuer, status="active", source="provider_token",
     )
     db.add(card)
     db.commit()
-    return card   # the number and CVC go no further than this function
+    return card

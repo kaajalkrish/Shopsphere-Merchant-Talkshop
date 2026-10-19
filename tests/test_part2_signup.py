@@ -107,7 +107,8 @@ def test_existing_account_can_verify_its_card(client):
     email = f"older-{uuid.uuid4().hex[:8]}@example.com"
     r = client.post("/api/auth/register", json={"name": "Casey Older", "email": email, "password": "older1234"})
     h = {"Authorization": f"Bearer {r.json()['access_token']}"}
-    assert client.get("/api/member", headers=h).json()["code"] == "NO_ELIGIBLE_CARD"
+    before = client.get("/api/member", headers=h).json()     # CH-2: a customer already; no Chase benefits yet
+    assert before["eligible"] and before["code"] is None and before["chase_benefits"] is False
     with Session(get_engine()) as db:
         db.add(IssuerCardholder(record_id=f"CH_T_{uuid.uuid4().hex[:10]}", full_name="Casey Older", email=email,
                                 account_type="credit_card", network="Mastercard", last4="2468"))
@@ -115,7 +116,7 @@ def test_existing_account_can_verify_its_card(client):
     bad = client.post("/api/member/verify-card", json={"last4": "2469"}, headers=h)
     assert bad.status_code == 400 and bad.json()["detail"]["message"] == NO_MATCH
     ok = client.post("/api/member/verify-card", json={"last4": "2468"}, headers=h)
-    assert ok.status_code == 200 and ok.json()["eligible"]
+    assert ok.status_code == 200 and ok.json()["eligible"] and ok.json()["chase_benefits"] is True
     assert client.get("/api/products", headers=h).status_code == 200
 
 

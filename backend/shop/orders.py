@@ -24,7 +24,8 @@ def new_display_id(db: Session) -> str:
             return candidate
 
 
-def finalize(db: Session, co: Checkout, payment_ref: str, payment_path: Optional[str] = None) -> Order:
+def finalize(db: Session, co: Checkout, payment_ref: str, payment_path: Optional[str] = None,
+             provider_card: Optional[dict] = None) -> Order:
     """Turn the authorized payment's order row into the full ShopSphere order.
     Runs once: an order that is already finalized is returned unchanged, so a
     retry can never commit stock, points or offers twice."""
@@ -45,7 +46,9 @@ def finalize(db: Session, co: Checkout, payment_ref: str, payment_path: Optional
     if order.payment_method_type == "wallet":
         order.payment_brand, order.payment_last4 = "ShopSphere Wallet", None
     else:
-        order.payment_brand, order.payment_last4 = (card.brand, card.last4) if card else (None, None)
+        # CH-6: a new card through the provider: only its network + last 4 are known to ShopSphere
+        src = provider_card or ({"brand": card.brand, "last4": card.last4} if card else None)
+        order.payment_brand, order.payment_last4 = (src["brand"], src["last4"]) if src else (None, None)
     order.payment_status = "authorized"
     # Guest order: the checkout email/name, never a customer account (Phase 10)
     order.guest_email, order.guest_name = co.guest_email, co.guest_name
@@ -67,11 +70,14 @@ def finalize(db: Session, co: Checkout, payment_ref: str, payment_path: Optional
                       co.offer_discount)
     order.bonus_points, order.cashback = 0, 0.0
     if is_customer:
-        for b in offers.bonus_points(db, co.user_id, lines):
+        # CH-3: bonus points and cashback follow the card the order was paid with
+        from backend.shop.entitlements import payment_for_checkout
+        paying = payment_for_checkout(db, co, order.payment_path)
+        for b in offers.bonus_points(db, co.user_id, lines, paying):
             if offers.record(db, co.user_id, order.order_id, b["offer_id"], "bonus_points", b["points"]):
                 rewards.earn(db, co.user_id, order.order_id, b["points"], f"Bonus: {b['title']}", key=f"BONUS-{b['offer_id']}")
                 order.bonus_points += b["points"]
-        for c in offers.cashback(db, co.user_id, lines, agent_pay=order.payment_path == "vic"):
+        for c in offers.cashback(db, co.user_id, lines, paying):
             if offers.record(db, co.user_id, order.order_id, c["offer_id"], "cashback", c["amount"]):
                 order.cashback = round(order.cashback + c["amount"], 2)
         order.points_earned += order.bonus_points

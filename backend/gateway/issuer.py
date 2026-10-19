@@ -1,5 +1,6 @@
 """
-SIMULATED Chase issuer (and a generic simulated issuer for non-Chase cards).
+SIMULATED card issuers: named after the card's issuer account (Chase, Citi,
+American Express …), or a generic simulated issuer when none is on file.
 Approves or declines from the card fixture: account status, available credit,
 the demo "decline" card, and demo scenario overrides. Not a real issuer.
 """
@@ -14,7 +15,7 @@ from backend.vic.common import now
 
 def authorize(db: Session, card: PaymentMethod, acct: Optional[CardAccount], amount: float,
               scenario: Optional[str]) -> dict:
-    name = "Simulated Chase issuer" if acct else "Simulated card issuer"
+    name = f"Simulated {acct.issuer} issuer" if acct and acct.issuer else "Simulated card issuer"
     t = now()
     if (card.exp_year, card.exp_month) < (t.year, t.month):
         return {"actor": name, "result": "declined", "reason": "CARD_EXPIRED", "detail": "Card expired"}

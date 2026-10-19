@@ -11,7 +11,7 @@ const STATUS_TONE: Record<string, string> = {
   NOT_ENROLLED: "bg-panel text-muted", REVOKED: "bg-bad-soft text-bad",
 };
 
-/** Member area (Part 2): profile, eligibility, masked cards, agent payments, demo controls. */
+/** Account (CH-2): profile, masked cards (issuer + network), Chase benefits, agent payments, demo controls. */
 export default function AccountPage() {
   const { info, refresh } = useMember();
   const { enrollAgentPay } = usePasskey();
@@ -54,10 +54,10 @@ export default function AccountPage() {
                   </div>
                   <span className={cx("text-[11px] font-semibold rounded-full px-2.5 py-1",
                     a.marketplace_eligible ? "bg-good-soft text-good" : "bg-panel text-muted")}>
-                    {a.marketplace_eligible ? "Marketplace eligible" : "Not eligible"}
+                    {a.marketplace_eligible ? "Chase benefits" : a.account_type === "credit_card" ? "Credit card" : "No card benefits"}
                   </span>
                 </div>
-                {a.network === "Visa" && a.marketplace_eligible && (
+                {a.network === "Visa" && a.agent_pay_capable && (
                   <div className="rounded-xl bg-panel p-4 flex flex-col gap-3">
                     <div className="flex items-center justify-between gap-3">
                       <p className="text-sm font-medium flex items-center gap-2"><Bot size={16} className="text-talk" /> Visa agent payments</p>

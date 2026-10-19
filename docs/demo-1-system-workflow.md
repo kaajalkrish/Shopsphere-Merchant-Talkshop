@@ -558,3 +558,20 @@ agent token (`vat_`) · purchase credential (`pcr_`) · gateway authorization (`
 | **A2A** | Not needed between Demo 1's six internal agents |
 | **Visa Trusted Agent Protocol** | Not used; relevant to an independent external agent (Demo 2) |
 
+---
+
+## 17. General credit-card holders (CH-1 … CH-11)
+
+Plan and progress: [`shopsphere-cardholder-execution-plan.md`](shopsphere-cardholder-execution-plan.md) · audit:
+[`shopsphere-cardholder-current-state.md`](shopsphere-cardholder-current-state.md).
+
+| Concern | Where | Rule |
+|---|---|---|
+| Access | `backend/shop/eligibility.py` | Browse + cart: everyone · checkout: signed-in customer (any issuer) · pay: a credit-card holder |
+| Card model | `backend/shop/cards.py` | Issuer (CHASE, CITI, AMEX …) is separate from network (VISA, MASTERCARD, AMEX, DISCOVER) |
+| Offers | `backend/shop/entitlements.py` | Every offer is Chase-exclusive and applies only when the order is **paid with** an eligible Chase credit card; 2× points with a Chase card; reasons for every "no" |
+| Checkout | `backend/shop/checkout.py` | Benefits revalidated on every change and before paying; `checkout_version`; authoritative `invoice` |
+| Consent | `backend/shop/payment.py::confirm` | action PAY + merchant + order + amount + currency + version; stale → 409, nothing charged; no automatic consent; cancellations recorded |
+| Routing | `backend/shop/payment_routing.py` | wallet · saved_card (any network) · vic (Visa + agent-pay capable + active token) · provider_handoff |
+| New card | `backend/gateway/provider.py` | Simulated Secure Payment Provider: provider-owned page, synthetic outcomes, no card fields; safe result fetched server-to-server; single-use session; save only on request |
+

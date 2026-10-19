@@ -29,3 +29,9 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local logs, editor settings, build caches and Office lock files
+*.log
+.vscode/
+*.tsbuildinfo
+~$*

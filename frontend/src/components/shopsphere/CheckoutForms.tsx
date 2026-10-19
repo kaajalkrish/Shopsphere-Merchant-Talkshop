@@ -1,7 +1,7 @@
 /** Inline "add address" / "add card" forms — used by the checkout page and
  *  (Phase 5) Talkshop's review card for customers without saved details. */
 import { useState, type FormEvent } from "react";
-import { Lock } from "lucide-react";
+import { Lock, ShieldCheck } from "lucide-react";
 import { shop, ShopError, type Address, type Card, type Checkout } from "../../api/shop";
 import { Button, Field, Notice } from "../ui";
 
@@ -38,64 +38,35 @@ export function AddressForm({ onSaved, onCancel, defaultName }: { onSaved: (a: A
   );
 }
 
-/** allowSave: customers may keep the card (unticked by default); guests can't —
- *  their card is used for this order only (Phase 10). */
-export function CardForm({ onSaved, onCancel, allowSave = true }: { onSaved: (c: Card) => void; onCancel?: () => void; allowSave?: boolean }) {
-  const [f, setF] = useState({ number: "", expiry: "", cvc: "", cardholder_name: "" });
-  const [save, setSave] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    const m = f.expiry.match(/^(\d{1,2})\s*\/\s*(\d{2,4})$/);
-    if (!m) { setError("Expiry should look like 08/29."); return; }
-    setSaving(true); setError(null);
-    try {
-      // The card goes straight to ShopSphere for tokenization; only the masked
-      // result (id, brand, last 4) comes back. Wipe the raw fields at once.
-      const saved = await shop.addCard({ number: f.number, exp_month: Number(m[1]), exp_year: Number(m[2]), cvc: f.cvc,
-        cardholder_name: f.cardholder_name, make_default: allowSave && save, save: allowSave && save });
-      setF({ number: "", expiry: "", cvc: "", cardholder_name: "" });
-      onSaved(saved);
-    } catch (err) { setError(err instanceof ShopError ? err.message : "Couldn't save that card."); }
-    finally { setSaving(false); }
-  };
-  const fmtNumber = (v: string) => v.replace(/\D/g, "").slice(0, 19).replace(/(.{4})/g, "$1 ").trim();
-  const fmtExpiry = (v: string) => { const d = v.replace(/\D/g, "").slice(0, 4); return d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d; };
-
+/** CH-6: ShopSphere never takes a card number or security code on its own pages. A new
+ *  card is given on the (simulated) payment provider's own page after the customer approves
+ *  the exact invoice; ShopSphere gets back only a token, the network and the last 4. */
+export function NoCardEntryNotice({ onCancel, onUseProvider }: { onCancel?: () => void; onUseProvider?: () => void }) {
   return (
-    <form onSubmit={submit} className="grid grid-cols-2 gap-3">
-      <Field label="Card number" inputMode="numeric" value={f.number} onChange={(e) => setF({ ...f, number: fmtNumber(e.target.value) })}
-        required className="col-span-2" placeholder="4242 4242 4242 4242" autoComplete="off" />
-      <Field label="Expiry" inputMode="numeric" value={f.expiry} onChange={(e) => setF({ ...f, expiry: fmtExpiry(e.target.value) })}
-        required placeholder="MM/YY" autoComplete="off" />
-      <Field label="CVC" inputMode="numeric" type="password" value={f.cvc} maxLength={4}
-        onChange={(e) => setF({ ...f, cvc: e.target.value.replace(/\D/g, "") })} required placeholder="123" autoComplete="off" />
-      <Field label="Name on card" value={f.cardholder_name} onChange={(e) => setF({ ...f, cardholder_name: e.target.value })}
-        required className="col-span-2" autoComplete="off" />
-      {allowSave ? (
-        <label className="col-span-2 flex items-center gap-2 text-sm cursor-pointer select-none">
-          <input id="save-card" type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} className="w-4 h-4 accent-[var(--ss-ink)]" />
-          Save this card for next time
-        </label>
-      ) : (
-        <p className="col-span-2 text-xs text-muted">Used for this order only. ShopSphere won't keep this card.</p>
-      )}
-      <p className="col-span-2 flex items-center gap-1.5 text-xs text-muted">
-        <Lock size={12} /> Only the card's last 4 digits are stored. The full number and CVC are never kept.
+    <div className="flex flex-col gap-2.5 rounded-xl bg-panel p-3.5 text-sm">
+      <p className="font-medium flex items-center gap-2"><Lock size={14} /> Pay with a new card</p>
+      <p className="text-xs text-muted leading-relaxed">
+        ShopSphere checkout is for credit-card holders. For your security ShopSphere never takes a card number or
+        security code on its own pages: after you approve the order, the Simulated Secure Payment Provider's own page
+        takes the card. You can choose to save it there for next time.
       </p>
-      {error && <div className="col-span-2"><Notice>{error}</Notice></div>}
-      <div className="col-span-2 flex gap-2">
-        <Button type="submit" loading={saving}>Save card</Button>
-        {onCancel && <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>}
-      </div>
-    </form>
+      {onUseProvider && (
+        <button type="button" onClick={onUseProvider}
+          className="self-start inline-flex items-center gap-2 h-9 px-4 rounded-full bg-btn text-btn-ink text-xs font-medium">
+          <ShieldCheck size={14} /> Pay with a new card (secure payment provider)
+        </button>
+      )}
+      {onCancel && <button type="button" onClick={onCancel} className="self-start text-xs font-medium underline">Back</button>}
+    </div>
   );
 }
 
-/** Guest checkout (no account): name, email and shipping address, sent straight
- *  to ShopSphere's checkout. The email is where the confirmation goes. */
+/** Kept for older call sites: there is no card-number form any more (CH-6). */
+export function CardForm({ onCancel, onUseProvider }: { onSaved?: (c: Card) => void; onCancel?: () => void;
+  allowSave?: boolean; onUseProvider?: () => void }) {
+  return <NoCardEntryNotice onCancel={onCancel} onUseProvider={onUseProvider} />;
+}
+
 export function GuestDetailsForm({ checkoutId, initial, onSaved, onCancel }:
   { checkoutId: string; initial?: { name?: string | null; email?: string | null }; onSaved: (co: Checkout) => void; onCancel?: () => void }) {
   const [f, setF] = useState({ full_name: initial?.name ?? "", email: initial?.email ?? "", line1: "", line2: "", city: "", state: "", postal_code: "" });

@@ -72,6 +72,39 @@ class MockGatewayAdapter:
                              decline_reason=body.get("decline_reason"), duplicate=bool(body.get("duplicate")),
                              steps=body.get("steps") or [], transport=self.transport_label)
 
+    # ── CH-6: Simulated Secure Payment Provider (server-to-server; the merchant key) ──
+    def hosted_url(self, session_id: str) -> str:
+        """Where the customer's browser goes: the provider's own page. Separate service →
+        its own origin; one-process demo → mounted under /psp on the backend."""
+        base = (os.getenv("PROVIDER_PUBLIC_URL") or self.base_url
+                or os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000").rstrip("/") + "/psp")
+        return f"{base.rstrip('/')}/hosted/{session_id}"
+
+    async def _provider(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, dict]:
+        try:
+            async with self._client() as client:
+                resp = await client.request(method, path, json=body, headers={"X-Gateway-Key": self.key})
+        except httpx.TimeoutException:
+            return 504, {"code": "PROVIDER_TIMEOUT"}
+        except httpx.HTTPError as exc:
+            return 502, {"code": "PROVIDER_UNAVAILABLE", "message": type(exc).__name__}
+        data = resp.json() if resp.content else {}
+        return resp.status_code, (data.get("detail") if resp.status_code >= 400 and isinstance(data.get("detail"), dict)
+                                  else data)
+
+    async def create_payment_session(self, body: dict) -> tuple[int, dict]:
+        return await self._provider("POST", "/v1/payment_sessions", body)
+
+    async def payment_session(self, session_id: str) -> tuple[int, dict]:
+        return await self._provider("GET", f"/v1/payment_sessions/{session_id}")
+
+    async def authorize_payment_session(self, session_id: str, body: dict) -> tuple[int, dict]:
+        """PayIt's authorization of a tokenized + verified provider credential (idempotent on payment_ref)."""
+        return await self._provider("POST", f"/v1/payment_sessions/{session_id}/authorize", body)
+
+    async def void_payment_session(self, session_id: str) -> tuple[int, dict]:
+        return await self._provider("POST", f"/v1/payment_sessions/{session_id}/void")
+
     async def void(self, gateway_ref: str) -> bool:
         try:
             async with self._client() as client:

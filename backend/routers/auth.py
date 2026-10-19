@@ -6,6 +6,7 @@ no server-side revocation list for a demo JWT.
 """
 import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from typing import Optional
 
@@ -15,8 +16,10 @@ from pydantic import BaseModel, EmailStr, Field
 from backend.auth.dependencies import CurrentUser, get_current_user
 from backend.auth.security import create_access_token, decode_access_token, hash_password, verify_password
 from backend.db.init_db import STARTING_WALLET_BALANCE
-from backend.db.schema import User, Wallet
-from backend.db.session_utils import get_session
+from sqlalchemy import func
+
+from backend.db.schema import LoyaltyPoints, User, Wallet
+from backend.db.session_utils import get_session, write_audit_event
 
 router = APIRouter()
 
@@ -68,7 +71,7 @@ def _adopt_visitor(visitor_id: Optional[str], customer_id: str) -> dict[str, str
         session.query(Wallet).filter(Wallet.user_id == visitor_id).delete()
         session.query(User).filter(User.user_id == visitor_id, User.is_guest.is_(True)).delete()
         session.commit()
-    talkshop_state.rekey(visitor_id, customer_id)
+    talkshop_state.rekey(visitor_id, customer_id, mapping)
     return mapping
 
 
@@ -89,25 +92,50 @@ async def visitor():
     return AuthResponse(access_token=create_access_token(user_id), user=current)
 
 
+# CH-7: sign-up probing (is this email a customer?) is throttled per email.
+SIGNUP_PROBE_LIMIT, SIGNUP_PROBE_WINDOW = 5, timedelta(minutes=15)
+_signup_probes: dict[str, list[datetime]] = {}
+
+
+def _probe_blocked(email: str) -> bool:
+    cutoff = datetime.now(timezone.utc) - SIGNUP_PROBE_WINDOW
+    recent = [t for t in _signup_probes.get(email, []) if t > cutoff]
+    _signup_probes[email] = recent
+    return len(recent) >= SIGNUP_PROBE_LIMIT
+
+
 @router.post("/api/auth/register", response_model=AuthResponse)
 async def register(req: RegisterRequest, authorization: Optional[str] = Header(default=None)):
+    """Create a ShopSphere customer account (CH-7: the default sign-up). No card details
+    are asked for; Chase benefits can be linked later. A visitor's cart and Talkshop
+    conversation come along."""
+    email, name = req.email.strip().lower(), " ".join(req.name.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="Please enter your name")
+    if _probe_blocked(email):
+        raise HTTPException(status_code=429, detail="Too many attempts for this email. Please wait 15 minutes, "
+                                                    "or sign in instead.")
     with get_session() as session:
-        existing = session.query(User).filter(User.email == req.email).first()
+        existing = session.query(User).filter(func.lower(User.email) == email).first()
         if existing:
+            _signup_probes.setdefault(email, []).append(datetime.now(timezone.utc))
             raise HTTPException(status_code=409, detail="An account with this email already exists")
 
         user_id = f"USR{uuid.uuid4().hex[:6].upper()}"
         session.add(User(
             user_id=user_id,
-            name=req.name,
-            email=req.email,
+            name=name,
+            email=email,
             password_hash=hash_password(req.password),
             status="active",
         ))
         session.add(Wallet(user_id=user_id, balance=STARTING_WALLET_BALANCE))
+        session.add(LoyaltyPoints(user_id=user_id, balance=0, lifetime_points=0))
+        write_audit_event(session, "CUSTOMER_SIGNUP", user_id=user_id,
+                          metadata={"chase_linked": False, "card_details_collected": False})
         session.commit()
 
-    current = CurrentUser(user_id=user_id, name=req.name, email=req.email)
+    current = CurrentUser(user_id=user_id, name=name, email=email)
     merged = _adopt_visitor(_visitor_id(authorization), user_id)
     return AuthResponse(access_token=create_access_token(user_id), user=current, merged_lines=merged)
 
@@ -115,7 +143,7 @@ async def register(req: RegisterRequest, authorization: Optional[str] = Header(d
 @router.post("/api/auth/login", response_model=AuthResponse)
 async def login(req: LoginRequest, authorization: Optional[str] = Header(default=None)):
     with get_session() as session:
-        user = session.query(User).filter(User.email == req.email).first()
+        user = session.query(User).filter(func.lower(User.email) == req.email.strip().lower()).first()
         if not user or user.is_guest or not verify_password(req.password, user.password_hash):
             raise HTTPException(status_code=401, detail="Incorrect email or password")
         current = CurrentUser(user_id=user.user_id, name=user.name, email=user.email)
@@ -177,9 +205,15 @@ class ResetPasswordRequest(BaseModel):
 
 
 @router.post("/api/auth/reset-password")
-async def reset_password(req: ResetPasswordRequest):
+async def reset_password(req: ResetPasswordRequest, current_user: CurrentUser = Depends(get_current_user)):
+    """Change the password of the account you are signed in to (CH-2, Q8). It used
+    to accept any email without signing in, which let anyone take over any account.
+    A real "forgot password" flow would email a one-time link instead."""
+    if current_user.is_visitor or req.email.strip().lower() != (current_user.email or "").strip().lower():
+        raise HTTPException(status_code=403, detail={
+            "code": "NOT_YOUR_ACCOUNT", "message": "Sign in to change your own password."})
     with get_session() as session:
-        user = session.query(User).filter(User.email == req.email).first()
+        user = session.query(User).filter(User.user_id == current_user.user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="No account found with that email")
         user.password_hash = hash_password(req.new_password)

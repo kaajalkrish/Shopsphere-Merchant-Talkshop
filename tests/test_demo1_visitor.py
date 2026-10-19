@@ -1,8 +1,8 @@
 """
-Demo 1, Phase 8 — visitor sessions. Part 2 made ShopSphere a cardmember-only
-marketplace: a visitor session still exists (so the gate page can explain why
-it can't enter), but browsing, the cart and Talkshop now need an eligible
-cardmember sign-in. Visitor accounts still store nothing personal.
+Demo 1, Phase 8 — visitor sessions. CH-2: visitors search, browse, chat with
+Talkshop and keep a cart; checkout needs a signed-in ShopSphere account (any
+credit-card holder; Chase status doesn't matter). Visitor accounts store
+nothing personal.
 """
 import json
 import uuid
@@ -98,13 +98,26 @@ def fake_llm(monkeypatch):
     monkeypatch.setattr(brain, "recommend", recommend)
 
 
-def test_visitor_can_browse_but_not_fill_a_cart(client):
-    """Part 2: a visitor browses the catalog (no member extras) and can chat with
-    Talkshop, but the cart and checkout are for eligible cardmembers."""
+def test_visitor_can_browse_and_fill_a_cart_but_checkout_needs_an_account(client):
+    """CH-2 (decision Q2): a visitor searches, browses, chats with Talkshop and keeps a
+    cart; checkout needs a signed-in ShopSphere account (sign in or sign up)."""
     h, _ = visitor(client)
     assert client.get("/api/products", headers=h).status_code == 200
     assert client.post("/api/talkshop/turn", json={"session_id": "vis12345", "text": "hi"}, headers=h).status_code == 200
-    for r in (client.get("/api/cart/lines", headers=h),
-              client.post("/api/cart/lines", json={"sku": "SSP002-ORANGE-9"}, headers=h)):
-        assert r.status_code == 403 and r.json()["detail"]["code"] == "LOGIN_REQUIRED"
+    r = client.post("/api/cart/lines", json={"sku": "SSP002-ORANGE-9"}, headers=h)
+    assert r.status_code == 200, r.text
+    line = r.json()["added_line_id"]
+    assert client.get("/api/cart/lines", headers=h).json()["item_count"] == 1
+    r = client.post("/api/checkouts", json={"line_ids": [line]}, headers=h)
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "LOGIN_REQUIRED"
+    r = client.post("/api/checkouts", json={"line_ids": [line], "guest": True}, headers=h)   # no guest checkout
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "LOGIN_REQUIRED"
 
+
+def test_signing_up_brings_the_visitor_cart_along(client):
+    h, _ = visitor(client)
+    line = client.post("/api/cart/lines", json={"sku": "SSP002-ORANGE-9"}, headers=h).json()["added_line_id"]
+    body, _ = new_customer(client, headers=h)
+    assert line in body["merged_lines"]
+    ch = {"Authorization": f"Bearer {body['access_token']}"}
+    assert client.get("/api/cart/lines", headers=ch).json()["item_count"] == 1

@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests.conftest import scoped_consent, add_card
 
 HOME = {"full_name": "Test Shopper", "line1": "1 Main St", "city": "Austin", "state": "TX", "postal_code": "78701"}
 WORK = {**HOME, "line1": "500 Congress Ave", "label": "Work"}
@@ -27,7 +28,8 @@ def auth_headers(member_headers):
 
 
 def add(client, h, path, body):
-    r = client.post(path, json=body, headers=h)
+    # CH-6: cards come from the (simulated) payment provider, never as card numbers
+    r = add_card(client, h, body) if path == "/api/me/payment-methods" else client.post(path, json=body, headers=h)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -86,7 +88,7 @@ def test_past_orders_keep_their_address_and_card(client, auth_headers):
     home = add(client, auth_headers, "/api/me/addresses", HOME)
     card = add(client, auth_headers, "/api/me/payment-methods", VISA)
     co = open_checkout(client, auth_headers)
-    res = client.post(f"/api/checkouts/{co['checkout_id']}/confirm", json={"consent": True}, headers=auth_headers).json()
+    res = client.post(f"/api/checkouts/{co['checkout_id']}/confirm", json=scoped_consent(client, auth_headers, co['checkout_id']), headers=auth_headers).json()
     order_id = res["order"]["order_id"]
     client.delete(f"/api/me/addresses/{home['address_id']}", headers=auth_headers)
     client.delete(f"/api/me/payment-methods/{card['payment_method_id']}", headers=auth_headers)

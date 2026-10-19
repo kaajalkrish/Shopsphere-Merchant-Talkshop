@@ -8,16 +8,18 @@ Cart (SKU-based; every call returns the full cart)
   PATCH  /api/cart/lines/{line_id}      {quantity}   (0 removes)
   DELETE /api/cart/lines/{line_id}
 
-Customer profile (cards are stored masked; number/CVC are never kept)
+Customer profile (cards are stored masked: an opaque token + network + last 4)
   GET/POST /api/me/addresses              DELETE /api/me/addresses/{id}
-  GET/POST /api/me/payment-methods        DELETE /api/me/payment-methods/{id}
+  GET /api/me/payment-methods             DELETE /api/me/payment-methods/{id}
+  POST /api/me/payment-methods            410 PAN_NOT_ACCEPTED (CH-6: never takes card numbers)
 
 Checkout + payment
   POST /api/checkouts                       {line_ids}       → review snapshot
   GET  /api/checkouts/{id}
   PATCH /api/checkouts/{id}                 {delivery_method?, address_id?, payment_method_id?, quantities?}
   POST /api/checkouts/{id}/cancel
-  POST /api/checkouts/{id}/confirm          {consent: true}  → authorized order | declined | blocked
+  POST /api/checkouts/{id}/confirm          {consent: true, action: "PAY", checkout_version, final_amount, currency}
+                                            → authorized order | declined | blocked | 409 STALE_CHECKOUT
 
 The older /api/cart and /api/cart/items endpoints (product-level, no SKU) stay
 for the current chat UI until Demo 1 Phase 5 replaces it.
@@ -38,17 +40,27 @@ from backend.shop import notifications
 from backend.shop import orders as order_service
 from backend.shop import profile as profile_service
 from backend.shop import shipping
-from backend.shop.eligibility import require_cardmember
+from backend.shop.eligibility import require_shopper
 
-# Part 2: every marketplace service is for eligible cardmembers only. The
-# router-level check runs before each endpoint (guests and checking-only
-# customers get 403 LOGIN_REQUIRED / NO_ELIGIBLE_CARD).
-router = APIRouter(tags=["shop"], dependencies=[Depends(require_cardmember)])
+# CH-2 access levels (backend/shop/eligibility.py): the cart is open to everyone
+# (visitors too); checkout, saved details and payment need a signed-in customer
+# (any card issuer); paying also needs a credit card (checked in payment.confirm).
+# Order tracking by Order ID + email is public. The issuer is never an access rule.
+router = APIRouter(tags=["shop"])
 
 
 def get_db():
     with Session(get_engine()) as session:
         yield session
+
+
+def eligibility_check(db: Session, user: CurrentUser) -> Optional[JSONResponse]:
+    """Checkout-level access for a signed-in user (an inactive account is refused)."""
+    from backend.shop import eligibility
+    code = eligibility.check_access(db, user)
+    if not code:
+        return None
+    return JSONResponse(status_code=403, content={"detail": {"code": code, "message": eligibility.MESSAGES[code]}})
 
 
 def _error(exc) -> JSONResponse:
@@ -112,16 +124,6 @@ class AddressRequest(BaseModel):
     make_default: bool = False
 
 
-class CardRequest(BaseModel):
-    number: str
-    exp_month: int
-    exp_year: int
-    cvc: str
-    cardholder_name: str
-    make_default: bool = False
-    save: Optional[bool] = None     # Phase 10: False = use for this order only (guests: always False)
-
-
 @router.get("/api/me/addresses")
 def get_addresses(user: CurrentUser = Depends(require_customer), db: Session = Depends(get_db)):
     return [profile_service.address_dict(a) for a in profile_service.list_addresses(db, user.user_id)]
@@ -142,17 +144,14 @@ def get_cards(user: CurrentUser = Depends(require_customer), db: Session = Depen
 
 
 @router.post("/api/me/payment-methods")
-def add_card(req: CardRequest, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Tokenize a card. Customers choose whether to save it; a guest's card is
-    always one-time (used for this order only, never listed)."""
-    fields = req.model_dump()
-    asked = fields.pop("save")
-    save = False if user.is_visitor else (True if asked is None else asked)
-    try:
-        card = profile_service.add_card(db, user.user_id, save=save, **fields)
-    except profile_service.ProfileError as exc:
-        return _error(exc)
-    return profile_service.card_dict(card)   # masked: brand, last 4, expiry
+def add_card(user: CurrentUser = Depends(require_shopper)):
+    """CH-6: ShopSphere never accepts a card number or CVC — whatever is sent here is
+    refused unread. A new card is given on the (simulated) payment provider's own page
+    at checkout, and kept only if the customer ticks "save" there."""
+    return JSONResponse(status_code=410, content={"detail": {
+        "code": "PAN_NOT_ACCEPTED",
+        "message": "For your security ShopSphere never takes card numbers. Pay with a new card through the secure "
+                   "payment provider at checkout, and choose \"save\" there to keep it for next time."}})
 
 
 @router.delete("/api/me/addresses/{address_id}")
@@ -211,14 +210,25 @@ class ConfirmRequest(BaseModel):
     # Visa agent-payment path (Part 2): the member's AUTHENTICATED payment instruction
     instruction_id: Optional[str] = Field(None, max_length=80)
     consent_mode: str = Field("button", pattern="^(button|typed)$")
+    # CH-4 consent scope: what the customer approved on the final invoice (compared, never trusted for the amount)
+    action: Optional[str] = Field(None, pattern="^PAY$")
+    checkout_version: Optional[int] = Field(None, ge=1)
+    final_amount: Optional[float] = Field(None, ge=0)
+    currency: Optional[str] = Field(None, max_length=3)
+    # CH-6: where the payment provider's page sends the customer back (ShopSphere's own origin only)
+    return_url: Optional[str] = Field(None, max_length=300)
 
 
 @router.post("/api/checkouts")
 def create_checkout(req: CreateCheckoutRequest, user: CurrentUser = Depends(get_current_user),
                     db: Session = Depends(get_db)):
-    if user.is_visitor and not req.guest:          # visitors: log in, sign up, or continue as guest
+    if user.is_visitor:                            # visitors sign in or sign up at checkout (no guest checkout)
         raise HTTPException(status_code=403, detail={
-            "code": "LOGIN_REQUIRED", "message": "Please log in, create an account, or continue as a guest."})
+            "code": "LOGIN_REQUIRED", "message": "Sign in or create a ShopSphere account to check out. "
+                                                 "Your cart comes with you."})
+    require = eligibility_check(db, user)
+    if require:
+        return require
     try:
         co = checkout_service.create_checkout(db, user.user_id, req.line_ids)
     except checkout_service.CheckoutError as exc:
@@ -227,7 +237,7 @@ def create_checkout(req: CreateCheckoutRequest, user: CurrentUser = Depends(get_
 
 
 @router.get("/api/checkouts/{checkout_id}")
-def get_checkout(checkout_id: str, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_checkout(checkout_id: str, user: CurrentUser = Depends(require_shopper), db: Session = Depends(get_db)):
     try:
         return checkout_service.snapshot(db, checkout_service.get_checkout(db, user.user_id, checkout_id))
     except checkout_service.CheckoutError as exc:
@@ -235,7 +245,7 @@ def get_checkout(checkout_id: str, user: CurrentUser = Depends(get_current_user)
 
 
 @router.patch("/api/checkouts/{checkout_id}")
-def update_checkout(checkout_id: str, req: UpdateCheckoutRequest, user: CurrentUser = Depends(get_current_user),
+def update_checkout(checkout_id: str, req: UpdateCheckoutRequest, user: CurrentUser = Depends(require_shopper),
                     db: Session = Depends(get_db)):
     try:
         co = checkout_service.update_checkout(db, user.user_id, checkout_id, **req.model_dump())
@@ -245,26 +255,50 @@ def update_checkout(checkout_id: str, req: UpdateCheckoutRequest, user: CurrentU
 
 
 @router.post("/api/checkouts/{checkout_id}/cancel")
-def cancel_checkout(checkout_id: str, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+async def cancel_checkout(checkout_id: str, user: CurrentUser = Depends(require_shopper)):
+    """Cancel before paying (CH-8: recorded as APPROVAL_CANCELLED; a pending provider
+    session is released). Nothing is ever charged."""
     try:
-        co = checkout_service.cancel_checkout(db, user.user_id, checkout_id)
+        return await payment_service.cancel(user, checkout_id)
     except checkout_service.CheckoutError as exc:
         return _error(exc)
-    return checkout_service.snapshot(db, co)
 
 
 @router.post("/api/checkouts/{checkout_id}/confirm")
-async def confirm_checkout(checkout_id: str, req: ConfirmRequest, user: CurrentUser = Depends(get_current_user)):
-    """Customers, and guests once their details are in (checked in payment.confirm)."""
+async def confirm_checkout(checkout_id: str, req: ConfirmRequest, user: CurrentUser = Depends(require_shopper)):
+    """Signed-in customers who hold a credit card (checked in payment.confirm)."""
     try:
         return await payment_service.confirm(user, checkout_id, req.consent, consent_mode=req.consent_mode,
-                                             instruction_id=req.instruction_id)
+                                             instruction_id=req.instruction_id, action=req.action,
+                                             checkout_version=req.checkout_version, final_amount=req.final_amount,
+                                             currency=req.currency, return_url=req.return_url)
+    except checkout_service.CheckoutError as exc:
+        return _error(exc)
+
+
+@router.post("/api/checkouts/{checkout_id}/payment-session/{session_id}/complete")
+async def complete_payment_session(checkout_id: str, session_id: str, user: CurrentUser = Depends(require_shopper)):
+    """CH-6: back from the payment provider's page. ShopSphere fetches the SAFE result from
+    the provider itself (never from the browser), checks it is for this exact approved
+    order, then places the order once. Repeat calls return the same order."""
+    try:
+        return await payment_service.complete_provider(user, checkout_id, session_id[:80])
+    except checkout_service.CheckoutError as exc:
+        return _error(exc)
+
+
+@router.post("/api/checkouts/{checkout_id}/payment-session/{session_id}/abandon")
+async def abandon_payment_session(checkout_id: str, session_id: str, user: CurrentUser = Depends(require_shopper)):
+    """The customer closed the secure payment sheet: release the provider session and go back
+    to review. Nothing is charged; a finished payment is not touched."""
+    try:
+        return await payment_service.abandon_provider(user, checkout_id, session_id[:80])
     except checkout_service.CheckoutError as exc:
         return _error(exc)
 
 
 @router.post("/api/checkouts/{checkout_id}/guest-details")
-def guest_details(checkout_id: str, req: GuestDetailsRequest, user: CurrentUser = Depends(get_current_user),
+def guest_details(checkout_id: str, req: GuestDetailsRequest, user: CurrentUser = Depends(require_shopper),
                   db: Session = Depends(get_db)):
     """Guest checkout: name, email and shipping address, straight to ShopSphere."""
     try:

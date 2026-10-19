@@ -12,10 +12,9 @@ import { Spinner } from "../components/ui";
  * docked on the right. This is a layout route, so the panel (and its
  * conversation) stays mounted while the member moves between pages.
  *
- * Anyone can browse and use Talkshop to find products. The cart, checkout,
- * member offers, rewards and payment are for eligible cardmembers: those pages
- * show the membership page (RequireMember in App.tsx) and the server refuses
- * those APIs for everyone else.
+ * Anyone can search, browse, use Talkshop and fill a cart. Checkout, orders and
+ * rewards need a ShopSphere account (any credit-card holder; RequireCustomer in
+ * App.tsx); offers are a Chase credit-card benefit. The server enforces the same.
  */
 export default function StoreLayout() {
   const { user } = useAuth();
@@ -46,8 +45,8 @@ function StoreFooter() {
         <div className="flex flex-col gap-3">
           <Wordmark />
           <p className="text-sm text-muted leading-relaxed max-w-xs">
-            The cardmember marketplace. Ask <span className="text-talk font-medium">Talkshop AI</span> whenever you
-            need a hand.
+            The marketplace for credit-card holders. Ask <span className="text-talk font-medium">Talkshop AI</span>
+            whenever you need a hand.
           </p>
         </div>
         {eligible && (
@@ -59,9 +58,9 @@ function StoreFooter() {
               </ul>
             </div>
             <div>
-              <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted mb-3">Membership</h4>
+              <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted mb-3">Your account</h4>
               <ul className="flex flex-col gap-2 text-sm">
-                <li><Link to="/offers" className="hover:underline">Exclusive offers</Link></li>
+                <li><Link to="/offers" className="hover:underline">Chase offers</Link></li>
                 <li><Link to="/rewards" className="hover:underline">Rewards</Link></li>
                 <li><Link to="/account" className="hover:underline">Account &amp; agent payments</Link></li>
               </ul>
