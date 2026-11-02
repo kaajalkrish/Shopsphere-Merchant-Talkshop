@@ -6,7 +6,7 @@
  * conversation into the account and reports how cart line ids changed.
  */
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { TOKEN_KEY, clearToken, getToken, setToken } from "../api/client";
+import { TOKEN_KEY, apiUrl, clearToken, getToken, setToken } from "../api/client";
 
 export interface User {
   user_id: string;
@@ -44,7 +44,7 @@ function clearTabState() {
 
 async function authCall(url: string, body?: unknown): Promise<{ access_token: string; user: User; merged_lines: Record<string, string> }> {
   const token = getToken();
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -79,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     started.current = true;
     const token = getToken();
     const restore = token
-      ? fetch("/api/auth/me", { headers: { Authorization: `Bearer ${token}` } })
+      ? fetch(apiUrl("/api/auth/me"), { headers: { Authorization: `Bearer ${token}` } })
           .then((r) => (r.ok ? r.json() : Promise.reject()))
           .then((u: User) => setUser(u))
       : Promise.reject();

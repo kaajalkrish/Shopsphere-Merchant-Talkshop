@@ -14,7 +14,11 @@ DEFAULT_ENDPOINT = "http://localhost:6006/v1/traces"
 
 
 def init_tracing() -> tuple[bool, Optional[str]]:
-    """Set up the OTLP exporter. Never raises — returns (enabled, endpoint)."""
+    """Set up the OTLP exporter. Never raises — returns (enabled, endpoint).
+    OTEL_SDK_DISABLED=true (the standard OpenTelemetry switch) turns it off, e.g. on a
+    cloud host with no collector; get_tracer() then hands out no-op tracers."""
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() == "true":
+        return False, None
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", DEFAULT_ENDPOINT)
     try:
         from opentelemetry import trace

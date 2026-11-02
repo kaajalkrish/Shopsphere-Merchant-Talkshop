@@ -76,8 +76,9 @@ class MockGatewayAdapter:
     def hosted_url(self, session_id: str) -> str:
         """Where the customer's browser goes: the provider's own page. Separate service →
         its own origin; one-process demo → mounted under /psp on the backend."""
-        base = (os.getenv("PROVIDER_PUBLIC_URL") or self.base_url
-                or os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000").rstrip("/") + "/psp")
+        # On Render, RENDER_EXTERNAL_URL is the service's public https URL (set by Render).
+        public = os.getenv("PUBLIC_BACKEND_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:8000"
+        base = os.getenv("PROVIDER_PUBLIC_URL") or self.base_url or public.rstrip("/") + "/psp"
         return f"{base.rstrip('/')}/hosted/{session_id}"
 
     async def _provider(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, dict]:

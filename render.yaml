@@ -1,0 +1,46 @@
+# Render Blueprint — ShopSphere Demo 1 backend (FastAPI), deployed from the `production` branch.
+# The frontend is on Vercel (frontend/vercel.json). Pushing to `production` redeploys.
+#
+# No secrets in this file. Values marked `sync: false` are entered in the Render
+# dashboard when the Blueprint is created (or later under Environment).
+# generateValue: Render creates a random value once and keeps it.
+#
+# SQLite lives in /tmp: it is ephemeral. Every restart, redeploy or free-plan
+# spin-down starts from a fresh, re-seeded demo database (orders, carts and
+# Talkshop chats reset). The simulated gateway/PSP runs in-process
+# (MOCK_GATEWAY_URL unset); its hosted page is served at /psp on this service.
+services:
+  - type: web
+    name: shopsphere-api
+    runtime: python
+    plan: free
+    branch: production
+    autoDeployTrigger: commit
+    buildCommand: pip install -r requirements.deploy.txt
+    startCommand: python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DEMO_MODE
+        value: "true"
+      - key: CATALOG_SOURCES
+        value: shopsphere
+      - key: COMMERCE_DB_PATH
+        value: /tmp/shopsphere-demo.db
+      - key: OTEL_SDK_DISABLED          # no trace collector on Render
+        value: "true"
+      # Random per deployment, never the public demo defaults
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: SIGNING_KEY
+        generateValue: true
+      - key: MOCK_GATEWAY_KEY
+        generateValue: true
+      # Entered in the dashboard
+      - key: GOOGLE_API_KEY             # required: the backend exits at startup without it
+        sync: false
+      - key: FRONTEND_URL               # the Vercel production URL, e.g. https://<project>.vercel.app
+        sync: false
+      - key: FRONTEND_ORIGINS           # same Vercel URL: may embed the provider page / be returned to
+        sync: false

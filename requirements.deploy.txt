@@ -1,0 +1,41 @@
+# Cloud deployment (Render) for ShopSphere Demo 1 — what the backend imports at
+# runtime, pinned to the versions the test suite passes with. requirements.txt
+# stays the full local/dev set.
+#
+# Left out on purpose (each is a lazy or guarded import; the demo already runs
+# without them):
+#   faster-whisper     /api/transcribe answers 503; Talkshop voice uses the browser's speech recognition
+#   nemoguardrails     Talkshop's input guardrail keeps its deterministic keyword layer; NeMo is fail-open
+#   guardrails-ai      validators fall back to plain JSON parsing (ImportError is handled)
+#   playwright         Best Buy adapter only (not in CATALOG_SOURCES=shopsphere)
+#   arize-phoenix      the local trace viewer; never imported (tracing is off on Render: OTEL_SDK_DISABLED)
+#   langchain, langchain-community   never imported (langchain-core comes with langchain-google-genai)
+#   opentelemetry-exporter-otlp      replaced by its HTTP part, the only exporter the code imports
+
+# ── Core API ──
+fastapi==0.141.1
+uvicorn[standard]==0.40.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+httpx==0.28.1
+
+# ── Data / DB ──
+pydantic==2.12.5
+SQLAlchemy==2.1.1
+aiosqlite==0.22.1
+
+# ── LLM (Gemini) + legacy agent graph ──
+langchain-core==1.6.5
+langchain-google-genai==4.4.0
+langgraph==1.2.12
+fastmcp==4.0.10
+
+# ── Security ──
+cryptography==50.0.0
+bcrypt==5.0.0
+PyJWT==2.13.0
+
+# ── Observability (no-op unless a collector is configured) ──
+opentelemetry-api==1.45.0
+opentelemetry-sdk==1.45.0
+opentelemetry-exporter-otlp-proto-http==1.45.0

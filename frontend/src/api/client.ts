@@ -4,6 +4,17 @@
  */
 export const TOKEN_KEY = "talkshop_token";
 
+/** Backend origin for production builds (e.g. https://shopsphere-api.onrender.com),
+ *  set as VITE_API_BASE_URL in Vercel. Unset locally: paths stay relative and the
+ *  Vite dev proxy forwards /api to localhost:8000. */
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
+
+/** "/api/products" → "<API_BASE>/api/products". Absolute URLs pass through unchanged. */
+export function apiUrl(path: string): string {
+  if (!API_BASE || /^[a-z][a-z\d+.-]*:/i.test(path)) return path;
+  return `${API_BASE}/${path.replace(/^\/+/, "")}`;
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -34,7 +45,7 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(apiUrl(url), { ...options, headers });
 
   // A lost session — expired/invalid token, or no token at all (e.g. another
   // tab cleared the shared one): reload so the page re-establishes who is
