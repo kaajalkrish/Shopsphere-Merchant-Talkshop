@@ -23,7 +23,8 @@ LLM_TOOLS = {
     "select_product": "The shopper picked one of the products shown (or named a product).",
     "choose_option": "The shopper answered the size/option or colour question.",
     "checkout": "The shopper wants to proceed to checkout with the item(s) Talkshop added.",
-    "keep_shopping": "The shopper doesn't want to check out yet.",
+    "keep_shopping": "The shopper doesn't want to check out yet, or wants to keep shopping / add more items "
+                     "without naming a product.",
     "update_checkout": "Change delivery (standard/express), quantity, address or card on the review screen.",
     "cancel_checkout": "The shopper doesn't want to place this order.",
     "track_order": "The shopper asks about an order they already placed (status, tracking, delivery, order details).",
@@ -37,6 +38,8 @@ def _db() -> Session:
 
 # Department words the shopper might use, mapped to catalog filters.
 _DEPARTMENTS = {"shoes": "shoes", "clothing": "clothing", "electronics": "electronics", "accessories": "accessories"}
+# Narrower kinds stored as the product's subcategory (e.g. earbuds vs headphones, both "electronics").
+_SUBCATEGORIES = {"earbuds", "headphones", "speakers", "smartwatches", "fitness_trackers"}
 
 
 def search_products(*, query: str, category: Optional[str] = None, brand: Optional[str] = None,
@@ -46,6 +49,8 @@ def search_products(*, query: str, category: Optional[str] = None, brand: Option
     filters = {}
     if category in _DEPARTMENTS:
         filters["department"] = _DEPARTMENTS[category]
+    elif category in _SUBCATEGORIES:
+        filters["subcategory"] = category
     elif category and category not in ("general", "chitchat"):
         filters["category"] = category
     with _db() as db:
@@ -173,7 +178,7 @@ def own_order(user_id: str, order_id: str) -> Optional[dict]:
 
 async def confirm_and_pay(user: CurrentUser, checkout_id: str, consent_mode: str = "button",
                           instruction_id: Optional[str] = None, scope: Optional[dict] = None,
-                          return_url: Optional[str] = None) -> dict:
+                          return_url: Optional[str] = None, approval_id: Optional[str] = None) -> dict:
     """Only ever called for the member's Approve-and-pay action (tapped, or the
     review card's countdown on the standard path). On the Visa path it also
     needs the member's AUTHENTICATED instruction (simulated passkey, done by
@@ -183,4 +188,4 @@ async def confirm_and_pay(user: CurrentUser, checkout_id: str, consent_mode: str
                                          instruction_id=instruction_id, action="PAY",
                                          checkout_version=scope.get("checkout_version"),
                                          final_amount=scope.get("final_amount"), currency=scope.get("currency"),
-                                         return_url=return_url)
+                                         return_url=return_url, approval_id=approval_id)

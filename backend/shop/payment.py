@@ -10,7 +10,9 @@ re-check stock and prices, then the secure path:
     vic        VIC-inspired controls on the member's AUTHENTICATED instruction
                → purchase-specific credential → gateway → simulated Visa
                network → simulated Chase issuer → commerce signal
-    standard   card-on-file token → gateway → simulated card network → issuer
+    standard   the cardholder's simulated passkey approval (any network: Mastercard,
+               Amex, Discover, Visa; backend/shop/card_approval.py) → card-on-file
+               token → gateway → simulated card network → issuer
     wallet     ShopSphere Wallet balance (internal; no gateway)
   TrackIt      order created only after authorization (once), email, tracking
 
@@ -33,7 +35,7 @@ from backend.models.payment import PaymentRequest, PaymentResult
 from backend.payment import processor_route
 from backend.shop import checkout as checkout_service
 from backend.shop import orders as order_service
-from backend.shop import cards
+from backend.shop import card_approval, cards
 from backend.shop import vic as vic_paths
 from backend.vic import credentials, signals
 from backend.vic.common import ALLOWED, MERCHANT_ID, MERCHANT_NAME, short, transition
@@ -80,11 +82,13 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
                   instruction_id: Optional[str] = None, *, action: Optional[str] = None,
                   checkout_version: Optional[int] = None, final_amount: Optional[float] = None,
                   currency: Optional[str] = None, return_url: Optional[str] = None,
-                  provider_session: Optional[dict] = None) -> dict:
+                  provider_session: Optional[dict] = None, approval_id: Optional[str] = None) -> dict:
     """consent_mode: "button" (Approve & Pay tapped) or "typed" (GO AHEAD typed in Talkshop
     on the Visa path, still followed by the passkey). CH-8: there is no automatic or
     countdown consent — any other mode is refused. The Visa path also needs the
-    member's AUTHENTICATED payment instruction (simulated passkey).
+    member's AUTHENTICATED payment instruction (simulated passkey); every other saved
+    card needs the cardholder's verified passkey approval for this exact order
+    (approval_id, card_approval.py) — same step, whatever the network.
 
     CH-4 scoped consent: the approval names action="PAY", the checkout_version, the
     final_amount and the currency the customer saw. If the order is no longer exactly
@@ -156,6 +160,10 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
                                                           checkout_id=checkout_id).first():
                 raise checkout_service.CheckoutError(
                     "UNKNOWN_INSTRUCTION", "That approval doesn't belong to this order.", 404)
+        card_step = card_approval.needed(path) and not completing
+        if card_step and not approval_id:
+            raise checkout_service.CheckoutError(
+                "APPROVAL_REQUIRED", "Confirm this payment with your passkey first. Nothing was charged.", 409)
         issues = checkout_service.refresh(db, co)      # live stock + prices + Chase benefits, right before paying
         db.commit()
         if stale():                                     # a price or benefit changed since the approval
@@ -178,12 +186,15 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
         payment_method_id = co.payment_method_id if pay_with == "card" and not completing else None
         mode = consent_mode
         benefits = json.loads(co.benefits_json) if co.benefits_json else {"applied": [], "removed": []}
+        if card_step:                                   # the cardholder's passkey approval, claimed once
+            card_approval.consume(db, user.user_id, co, approval_id)
         co.status = "consented"
         write_audit_event(db, "CHECKOUT_CONSENT", user_id=user.user_id, order_id=payment_ref,
                           metadata={"mode": mode, "checkout_hash": co.checkout_hash, "total": co.total,
                                     "action": "PAY", "merchant_id": MERCHANT_ID, "currency": co.currency,
                                     "checkout_version": co.version, "payment_path": path["path"],
-                                    "instruction": short(instruction_id) if instruction_id else None})
+                                    "instruction": short(instruction_id) if instruction_id else None,
+                                    "approval": short(approval_id) if card_step else None})
         if path["path"] == "vic":
             instr = db.query(PaymentInstruction).filter_by(instruction_id=instruction_id).one()
             instr.payment_ref = payment_ref
@@ -193,7 +204,8 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
     # shortened and no card data ever appears here.
     trace: list[dict] = [
         {"agent": "GreenLight", "check": "Consent gate", "result": "pass", "protocol": "AP2-style consent",
-         "detail": ("GO AHEAD typed, then passkey" if mode == "typed" else "Approve & Pay tapped")
+         "detail": ("GO AHEAD typed" if mode == "typed" else "Approve & Pay tapped")
+                   + (", then passkey" if path["path"] == "vic" or card_step else "")
                    + f" for checkout {checkout_id}, total ${amounts['total']:.2f}"},
         {"agent": "GreenLight", "check": "Consent scope", "result": "pass", "protocol": "AP2-style consent",
          "event": "GREENLIGHT_CONSENT_VALIDATED",
@@ -219,6 +231,13 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
                                          f"{(path.get('network') or 'card').title()} network → {path.get('issuer')}; "
                                          "no card entry page (the provider tokenized this card earlier)",
                              }.get(path["path"], path.get("label") or path["path"])})
+    if card_step:
+        trace.append({"agent": "GreenLight", "check": "Cardholder approval", "result": "pass",
+                      "protocol": "Simulated passkey (every card)", "layer": "simulated",
+                      "event": "CARDHOLDER_APPROVAL_VERIFIED",
+                      "detail": f"Approval {short(approval_id)}: simulated passkey verified for this exact order "
+                                f"(version {version}, ${amounts['total']:.2f}), used once. Same step on every network; "
+                                "the card issuer isn't contacted here"})
     if path["path"] == "vic":
         trace.append({"agent": "GreenLight", "check": "Payment instruction", "result": "pass",
                       "protocol": "VIC-inspired", "layer": "local",

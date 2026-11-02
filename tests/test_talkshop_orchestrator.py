@@ -15,7 +15,7 @@ from backend.db.schema import Order, PaymentMethod
 from backend.main import app
 from backend.talkshop import brain
 from backend.talkshop.state import ALLOWED, Stage
-from tests.conftest import add_card
+from tests.conftest import add_card, card_passkey
 
 REAL_DECIDE = brain.decide          # kept before the autouse fake replaces it
 REAL_RECOMMEND = brain.recommend
@@ -75,7 +75,7 @@ def turn(client, headers, sid, *, text=None, action=None, page=None):
     events = [json.loads(line[6:]) for block in r.text.split("\n\n") for line in block.splitlines()
               if line.startswith("data: ")]
     assert events[-1]["type"] == "done"
-    return events
+    return card_passkey(client, headers, sid, events)
 
 
 def of(events, kind):
@@ -162,7 +162,10 @@ def test_typing_never_pays(client, shopper, typed, fake_llm):
     co = _to_review(client, shopper, sid)
     ev = turn(client, shopper, sid, text=typed)
     assert not of(ev, "payment_status") and not of(ev, "order_confirmed")
-    assert "tap Approve and pay" in of(ev, "message")[0]["text"] and of(ev, "checkout_ready")
+    # A saved card: typing only starts the cardholder's passkey approval; the tap is still needed
+    assert "Confirm with your passkey" in of(ev, "message")[0]["text"]
+    req = of(ev, "approval_required")[0]
+    assert req["kind"] == "card" and req["consent_mode"] == "typed"
     assert stage(ev) == "AWAITING_CONSENT" and orders_for(co["checkout_id"]) == 0
     assert all(c["message"] != typed for c in fake_llm["decide"])   # never even reached the LLM
 
@@ -243,7 +246,9 @@ def test_keep_shopping_instead_of_checkout(client, shopper):
     turn(client, shopper, sid, text="8")
     turn(client, shopper, sid, text="white")
     ev = turn(client, shopper, sid, text="no thanks")
-    assert "saved in your ShopSphere cart" in of(ev, "message")[0]["text"] and stage(ev) == "IN_CART"
+    reply = of(ev, "message")[0]["text"]
+    assert "Runner Pro X (size 8, white) stays in your cart" in reply and "What would you like to add" in reply
+    assert stage(ev) == "IN_CART"
 
 
 def test_question_mid_flow_keeps_the_stage(client, shopper):

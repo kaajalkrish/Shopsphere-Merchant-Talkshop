@@ -3,6 +3,7 @@
  * and products.py. The website and the Talkshop panel both use these.
  */
 import { authFetch } from "./client";
+import type { PasskeyChallenge } from "./member";
 
 export interface ColorOption { name: string; hex: string; image_url: string | null; in_stock: boolean }
 export interface Product {
@@ -104,6 +105,12 @@ export interface Invoice {
   payment: { type: "card" | "wallet"; display: string; issuer?: string; network?: string; route?: string } | null;
 }
 /** CH-4 consent scope sent with "Approve & Pay": exactly what the customer saw. */
+/** The cardholder's passkey approval of one exact order (any saved card). */
+export interface CardApproval {
+  approval_id: string; checkout_id: string; checkout_version: number; amount: number; currency: string;
+  card: string | null; network: string | null;
+}
+
 export function consentScope(co: Pick<Checkout, "checkout_version" | "total" | "currency">) {
   return { action: "PAY" as const, checkout_version: co.checkout_version, final_amount: co.total, currency: co.currency };
 }
@@ -206,16 +213,25 @@ export const shop = {
   createCheckout: (lineIds: string[], guest = false) => call<Checkout>("/api/checkouts", json("POST", { line_ids: lineIds, guest })),
   guestDetails: (id: string, details: GuestDetails) => call<Checkout>(`/api/checkouts/${id}/guest-details`, json("POST", details)),
   checkout: (id: string) => call<Checkout>(`/api/checkouts/${id}`),
-  updateCheckout: (id: string, changes: { delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number> }) =>
+  updateCheckout: (id: string, changes: { delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number>; remove_line_ids?: string[] }) =>
     call<Checkout>(`/api/checkouts/${id}`, json("PATCH", changes)),
   loyalty: () => call<{ balance: number; lifetime_points: number }>("/api/loyalty"),
   cancelCheckout: (id: string) => call<Checkout>(`/api/checkouts/${id}/cancel`, json("POST")),
   /** Approve & Pay (CH-4): scoped to the invoice the customer saw. Visa agent-payment path: also the
-   *  member's AUTHENTICATED instruction (simulated passkey). A changed order → 409 STALE_CHECKOUT, nothing charged. */
-  confirm: (co: Pick<Checkout, "checkout_id" | "checkout_version" | "total" | "currency">, instructionId?: string) =>
+   *  member's AUTHENTICATED instruction; any other saved card: the cardholder's verified approval (both a
+   *  simulated passkey). A changed order → 409 STALE_CHECKOUT, nothing charged. */
+  confirm: (co: Pick<Checkout, "checkout_id" | "checkout_version" | "total" | "currency">,
+            proof?: { instructionId?: string; approvalId?: string }) =>
     call<ConfirmResult>(`/api/checkouts/${co.checkout_id}/confirm`,
-      json("POST", { consent: true, instruction_id: instructionId, ...consentScope(co),
+      json("POST", { consent: true, instruction_id: proof?.instructionId, approval_id: proof?.approvalId, ...consentScope(co),
         return_url: `${window.location.origin}/checkout/${co.checkout_id}` })),
+  /** Saved card, any network: a single-use simulated passkey challenge for this exact order. */
+  startCardApproval: (checkoutId: string) =>
+    call<{ approval: CardApproval; passkey: PasskeyChallenge }>(`/api/checkouts/${checkoutId}/approval`, json("POST", {})),
+  verifyCardApproval: (checkoutId: string, approvalId: string, p: PasskeyChallenge, user_verified: boolean) =>
+    call<{ approval_id: string; status: "verified" }>(
+      `/api/checkouts/${checkoutId}/approval/${encodeURIComponent(approvalId)}/verify`,
+      json("POST", { nonce: p.nonce, user_verified })),
   /** CH-6: back from the payment provider's page — ShopSphere checks the result with the provider itself. */
   completeProvider: (checkoutId: string, sessionId: string) =>
     call<ConfirmResult>(`/api/checkouts/${checkoutId}/payment-session/${encodeURIComponent(sessionId)}/complete`, json("POST", {})),

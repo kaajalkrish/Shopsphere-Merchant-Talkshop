@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from backend.auth.dependencies import CurrentUser, get_current_user, require_customer
 from backend.db.init_db import get_engine
+from backend.shop import card_approval
 from backend.shop import cart as cart_service
 from backend.shop import checkout as checkout_service
 from backend.shop import payment as payment_service
@@ -203,6 +204,7 @@ class UpdateCheckoutRequest(BaseModel):
     pay_with: Optional[str] = None                # card | wallet (Phase 10)
     points_used: Optional[int] = None             # loyalty points to spend (Phase 12)
     quantities: Optional[dict[str, int]] = None   # cart line id → quantity
+    remove_line_ids: Optional[list[str]] = Field(None, max_length=20)   # take items out of this order
 
 
 class ConfirmRequest(BaseModel):
@@ -217,6 +219,13 @@ class ConfirmRequest(BaseModel):
     currency: Optional[str] = Field(None, max_length=3)
     # CH-6: where the payment provider's page sends the customer back (ShopSphere's own origin only)
     return_url: Optional[str] = Field(None, max_length=300)
+    # Every saved card: the cardholder's verified (simulated) passkey approval for this exact order
+    approval_id: Optional[str] = Field(None, max_length=80)
+
+
+class PasskeyAnswer(BaseModel):
+    nonce: str = Field("", max_length=120)
+    user_verified: bool = False
 
 
 @router.post("/api/checkouts")
@@ -271,7 +280,31 @@ async def confirm_checkout(checkout_id: str, req: ConfirmRequest, user: CurrentU
         return await payment_service.confirm(user, checkout_id, req.consent, consent_mode=req.consent_mode,
                                              instruction_id=req.instruction_id, action=req.action,
                                              checkout_version=req.checkout_version, final_amount=req.final_amount,
-                                             currency=req.currency, return_url=req.return_url)
+                                             currency=req.currency, return_url=req.return_url,
+                                             approval_id=req.approval_id)
+    except checkout_service.CheckoutError as exc:
+        return _error(exc)
+
+
+@router.post("/api/checkouts/{checkout_id}/approval")
+def start_card_approval(checkout_id: str, user: CurrentUser = Depends(require_shopper),
+                        db: Session = Depends(get_db)):
+    """Saved card (any network): a single-use simulated passkey challenge bound to this
+    exact order (version + total). The nonce goes to this browser only."""
+    require = eligibility_check(db, user)
+    if require:
+        return require
+    try:
+        return card_approval.start(db, user.user_id, checkout_id)
+    except checkout_service.CheckoutError as exc:
+        return _error(exc)
+
+
+@router.post("/api/checkouts/{checkout_id}/approval/{approval_id}/verify")
+def verify_card_approval(checkout_id: str, approval_id: str, req: PasskeyAnswer,
+                         user: CurrentUser = Depends(require_shopper), db: Session = Depends(get_db)):
+    try:
+        return card_approval.verify(db, user.user_id, checkout_id, approval_id[:80], req.nonce, req.user_verified)
     except checkout_service.CheckoutError as exc:
         return _error(exc)
 

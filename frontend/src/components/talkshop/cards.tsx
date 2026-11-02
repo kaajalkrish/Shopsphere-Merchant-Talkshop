@@ -3,7 +3,7 @@
  *  computed here. Only the latest card of a kind is interactive. */
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { ArrowUpRight, Bot, Check, CheckCircle2, CreditCard, Fingerprint, Loader2, Lock, MapPin, ShieldCheck, ShoppingBag, Truck, UserRound, XCircle } from "lucide-react";
+import { ArrowUpRight, Bot, Check, CheckCircle2, CreditCard, Fingerprint, Loader2, Lock, MapPin, ShieldCheck, ShoppingBag, Trash2, Truck, UserRound, XCircle } from "lucide-react";
 import type { OptionChoice, TalkAction, TalkEvent } from "../../api/talkshop";
 import { money, niceDate, type Card, type Cart, type Checkout, type Order, type Product, type TrackedOrder } from "../../api/shop";
 import { ShipmentProgress } from "../shopsphere/ShipmentProgress";
@@ -237,7 +237,7 @@ function PathNote({ co }: { co: Checkout }) {
   if (p === "vic_setup_required") return <p className="text-[11px] rounded-lg bg-gold-soft text-gold px-2.5 py-1.5 leading-snug">
     Set up Visa agent payments first (simulated passkey), or choose another card.</p>;
   if (p === "standard") return <p className="text-[11px] rounded-lg bg-panel text-muted px-2.5 py-1.5 leading-snug">
-    Saved card payment through ShopSphere's gateway on the {co.payment_path?.network ?? "card"} network (no Visa agent token).</p>;
+    Saved card: you'll confirm with a simulated passkey, then ShopSphere's gateway charges it on the {co.payment_path?.network ?? "card"} network (no Visa agent token).</p>;
   if (p === "provider_handoff") return <p className="text-[11px] rounded-lg bg-panel text-muted px-2.5 py-1.5 leading-snug">
     New card: after you approve, the Simulated Secure Payment Provider's own page takes it. Talkshop never sees the card number.</p>;
   return null;
@@ -270,8 +270,14 @@ export function ReviewOrderCard({ checkout: co, active, busy, onAct }:
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium line-clamp-1">{l.name}</p>
               <p className="text-xs text-muted">{l.size ? `${l.option_label} ${l.size} · ` : ""}{l.color}</p>
-              {live ? <div className="mt-1"><Stepper value={l.quantity} busy={busy} max={10}
-                onChange={(n) => update({ quantities: { [l.line_id]: n } })} /></div>
+              {live ? <div className="mt-1 flex items-center gap-3"><Stepper value={l.quantity} busy={busy} max={10}
+                onChange={(n) => update({ quantities: { [l.line_id]: n } })} />
+                {co.lines.length > 1 && (
+                  <button type="button" disabled={busy} onClick={() => update({ remove_line_ids: [l.line_id] })}
+                    className="text-xs text-muted hover:text-bad inline-flex items-center gap-1 disabled:opacity-50"
+                    aria-label={`Remove ${l.name} from this order`}>
+                    <Trash2 size={13} /> Remove</button>
+                )}</div>
                 : <p className="text-xs text-muted">Qty {l.quantity}</p>}
             </div>
             <p className="text-sm font-semibold tabular-nums">{money(l.line_total)}</p>
@@ -356,7 +362,8 @@ export function ReviewOrderCard({ checkout: co, active, busy, onAct }:
               onClick={() => onAct({ type: "go_ahead", checkout_id: co.checkout_id, label: "Approve and pay",
                 checkout_version: co.checkout_version, final_amount: co.total, currency: co.currency,
                 return_url: `${window.location.origin}${window.location.pathname}` })}>
-              {co.payment_path?.path === "vic" ? <Fingerprint size={16} /> : co.pay_with === "provider" ? <ShieldCheck size={16} /> : <Lock size={15} />}
+              {co.payment_path?.path === "vic" || co.payment_path?.path === "standard" ? <Fingerprint size={16} />
+                : co.pay_with === "provider" ? <ShieldCheck size={16} /> : <Lock size={15} />}
               {co.payment_path?.path === "vic_setup_required" ? "Set up agent payments"
                 : co.pay_with === "provider" ? `Continue to Secure Payment · ${money(co.total)}` : `Approve & Pay ${money(co.total)}`}
             </Button>
@@ -364,7 +371,8 @@ export function ReviewOrderCard({ checkout: co, active, busy, onAct }:
               className="text-xs text-muted hover:text-ink -mt-1">Cancel</button>
             <p className="flex items-start gap-1.5 text-[11px] text-muted leading-snug">
               <ShieldCheck size={13} className="shrink-0" />
-              {co.payment_path?.path === "vic" ? "Nothing is charged until you approve and confirm with your passkey." : "Nothing is charged until you tap Approve and pay."} Talkshop never sees your card number.
+              {co.payment_path?.path === "vic" || co.payment_path?.path === "standard"
+                ? "Nothing is charged until you approve and confirm with your passkey." : "Nothing is charged until you tap Approve and pay."} Talkshop never sees your card number.
             </p>
           </>
         )}
@@ -547,11 +555,11 @@ export function SecureDetailsCard({ checkoutId, needs, guest, wallet, active, on
  *  form posts straight to ShopSphere's sign-up (never into the chat), the cart and this
  *  conversation come along, and Talkshop carries on to checkout. No card is asked for. */
 export function SignInCard({ active }: { active: boolean; reason?: string }) {
-  const { register } = useAuth();
+  const { register, login } = useAuth();
   const location = useLocation();
   const next = encodeURIComponent(location.pathname + location.search);
   const resume = () => { try { sessionStorage.setItem(RESUME_KEY, "checkout"); } catch { /* private mode */ } };
-  const [mode, setMode] = useState<"choose" | "signup">("choose");
+  const [mode, setMode] = useState<"choose" | "signin" | "signup">("choose");
   const [f, setF] = useState({ name: "", email: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -560,7 +568,10 @@ export function SignInCard({ active }: { active: boolean; reason?: string }) {
     e.preventDefault();
     setBusy(true); setError(null);
     resume();                                     // after the account exists, Talkshop goes on to checkout
-    try { await register(f.name, f.email, f.password); }
+    try {
+      if (mode === "signin") await login(f.email, f.password);
+      else await register(f.name, f.email, f.password);
+    }
     catch (err) {
       try { sessionStorage.removeItem(RESUME_KEY); } catch { /* private mode */ }
       setError((err as Error).message);
@@ -576,7 +587,21 @@ export function SignInCard({ active }: { active: boolean; reason?: string }) {
           ShopSphere checkout is for credit-card holders with a ShopSphere account. Your cart and this conversation
           come with you.
         </p>
-        {mode === "signup" ? (
+        {mode === "signin" ? (
+          <form onSubmit={submit} className="flex flex-col gap-2.5">
+            <Field label="Email" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} required autoComplete="email" />
+            <Field label="Password" type="password" value={f.password} required
+              onChange={(e) => setF({ ...f, password: e.target.value })} autoComplete="current-password" />
+            {error && <Notice>{error}</Notice>}
+            <Button type="submit" variant="talk" loading={busy}>Sign in and continue</Button>
+            <p className="flex items-start gap-1.5 text-[11px] text-muted leading-snug"><Lock size={12} className="shrink-0 mt-0.5" />
+              Sent straight to ShopSphere's sign-in, not into the chat. Your cart and this conversation carry on.</p>
+            <div className="flex items-center justify-between text-xs">
+              <button type="button" onClick={() => { setMode("choose"); setError(null); }} className="text-muted hover:text-ink">Back</button>
+              <Link to={`/login?next=${next}`} onClick={resume} className="text-muted underline hover:text-ink">Demo accounts</Link>
+            </div>
+          </form>
+        ) : mode === "signup" ? (
           <form onSubmit={submit} className="flex flex-col gap-2.5">
             <Field label="Full name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required autoComplete="name" />
             <Field label="Email" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} required autoComplete="email" />
@@ -587,14 +612,14 @@ export function SignInCard({ active }: { active: boolean; reason?: string }) {
             <p className="flex items-start gap-1.5 text-[11px] text-muted leading-snug"><Lock size={12} className="shrink-0 mt-0.5" />
               Sent straight to ShopSphere's sign-up, not into the chat. No card details: you'll give a card on the secure
               payment provider's page at checkout.</p>
-            <button type="button" onClick={() => setMode("choose")} className="text-xs text-muted hover:text-ink">Back</button>
+            <button type="button" onClick={() => { setMode("choose"); setError(null); }} className="text-xs text-muted hover:text-ink">Back</button>
           </form>
         ) : (
           <>
-            <Link to={`/login?next=${next}`} onClick={resume}
+            <button type="button" onClick={() => { setMode("signin"); setError(null); }}
               className="inline-flex items-center justify-center h-10 rounded-full bg-talk text-white text-sm font-medium hover:opacity-90">
               Sign in
-            </Link>
+            </button>
             <button type="button" onClick={() => setMode("signup")}
               className="inline-flex items-center justify-center h-10 rounded-full border border-line-strong text-sm font-medium hover:border-ink">
               New to ShopSphere? Create an account here
@@ -673,9 +698,9 @@ export function OrderTrackingCard({ order }: { order: TrackedOrder }) {
 
 /* ── Visa agent payments (Part 2) ──────────────────────────────────────── */
 
-/** The member confirms this exact order with a simulated passkey. The prompt is
- *  ShopSphere's (PasskeyContext → /api/vic/*); Talkshop only gets the resulting
- *  instruction id. Opens by itself once when it arrives live. */
+/** The member confirms this exact order with a simulated passkey, whatever the card. The
+ *  prompt is ShopSphere's (PasskeyContext → /api/vic/* or /api/checkouts/…/approval); Talkshop
+ *  only gets the resulting id. Opens by itself once when it arrives live. */
 export function ApprovalCard({ amount, payment, active, autoStart, onApprove }:
   { amount: number; payment: string | null; active: boolean; autoStart: boolean; onApprove: () => void }) {
   const started = useRef(false);
@@ -686,8 +711,8 @@ export function ApprovalCard({ amount, payment, active, autoStart, onApprove }:
     <Shell className={cx("p-4 flex flex-col gap-2.5", active && "border-talk/50")}>
       <p className="flex items-center gap-2 text-sm font-semibold"><Fingerprint size={17} className="text-talk" /> Confirm with your passkey</p>
       <p className="text-xs text-muted leading-snug">
-        Approve {money(amount)} at ShopSphere with {payment ?? "your Visa"}. This approval covers this exact order only.
-        <span className="block mt-1 text-faint">Simulated passkey authentication (demo, not a real Visa passkey).</span>
+        Approve {money(amount)} at ShopSphere with {payment ?? "your card"}. This approval covers this exact order only.
+        <span className="block mt-1 text-faint">Simulated passkey authentication (demo, not a real passkey).</span>
       </p>
       {active && <Button size="sm" variant="talk" onClick={onApprove}><Fingerprint size={14} /> Approve with passkey</Button>}
     </Shell>

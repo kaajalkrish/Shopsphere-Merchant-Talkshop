@@ -60,7 +60,7 @@ export default function CheckoutPage() {
   const { checkoutId = "" } = useParams();
   const { user } = useAuth();
   const { refresh } = useCart();
-  const { approveAgentPayment, enrollAgentPay } = usePasskey();
+  const { approveAgentPayment, approveCardPayment, enrollAgentPay } = usePasskey();
   const member = useMember();
   const navigate = useNavigate();
   const [co, setCo] = useState<Checkout | null | undefined>(undefined);
@@ -155,12 +155,12 @@ export default function CheckoutPage() {
         void member.refresh();
         return;
       }
-      // Visa path: this click creates the payment instruction for this exact order; the member
-      // then confirms it with the (simulated) passkey. Standard path: this click is the go-ahead.
-      const instructionId = path === "vic"
-        ? await approveAgentPayment(checkoutId, { amount: co!.total, card: (co!.payment_method as Card | null)?.display })
-        : undefined;
-      const res = await shop.confirm(co!, instructionId);
+      // Every saved card: this click asks the cardholder to confirm this exact order with the
+      // (simulated) passkey. Visa agent path: a payment instruction; any other card: an approval.
+      const card = (co!.payment_method as Card | null)?.display;
+      const instructionId = path === "vic" ? await approveAgentPayment(checkoutId, { amount: co!.total, card }) : undefined;
+      const approvalId = path === "standard" ? await approveCardPayment(checkoutId, { card }) : undefined;
+      const res = await shop.confirm(co!, { instructionId, approvalId });
       if (res.status === "provider_handoff") {
         // CH-6: approved — the provider's secure card form opens right here (embedded)
         setHandoff({ sessionId: res.payment_session_id, hostedUrl: res.hosted_url });
@@ -392,6 +392,12 @@ export default function CheckoutPage() {
                   {/* Price above the quantity on phones; side by side on wider screens */}
                   <div className="flex flex-col-reverse sm:flex-row items-end sm:items-center gap-2 sm:gap-4 shrink-0">
                     <Stepper value={l.quantity} busy={busy} onChange={(n) => change({ quantities: { [l.line_id]: n } })} />
+                    {co.lines.length > 1 && (
+                      <button type="button" disabled={busy} onClick={() => change({ remove_line_ids: [l.line_id] })}
+                        className="text-sm text-muted hover:text-bad inline-flex items-center gap-1.5 disabled:opacity-50"
+                        aria-label={`Remove ${l.name} from this order`}>
+                        <Trash2 size={14} /> Remove</button>
+                    )}
                     <p className="sm:w-20 text-right font-semibold tabular-nums">{money(l.line_total)}</p>
                   </div>
                 </li>
@@ -459,13 +465,14 @@ export default function CheckoutPage() {
             </Notice>
           )}
           <Button size="lg" onClick={place} loading={placing} disabled={!co.ready || busy}>
-            {co.payment_path?.path === "vic" ? <><Fingerprint size={16} /> Approve and pay · {money(co.total)}</>
+            {co.payment_path?.path === "vic" || co.payment_path?.path === "standard"
+              ? <><Fingerprint size={16} /> Approve and pay · {money(co.total)}</>
               : co.payment_path?.path === "vic_setup_required" ? <><Bot size={16} /> Set up Visa agent payments</>
               : <><Lock size={15} /> Approve &amp; Pay · {money(co.total)}</>}
           </Button>
           <p className="flex items-start gap-2 text-xs text-muted">
             <ShieldCheck size={14} className="shrink-0 mt-px" />
-            {co.payment_path?.path === "vic"
+            {co.payment_path?.path === "vic" || co.payment_path?.path === "standard"
               ? "You'll confirm this exact order with a simulated passkey. Nothing is charged until you do."
               : "You're charged only when you approve, after ShopSphere's payment security checks."}
           </p>
@@ -485,7 +492,7 @@ function PaymentPathNote({ co }: { co: Checkout }) {
   const text = p.path === "vic" ? "Visa agent payment: you approve with a passkey (simulated), then a one-time payment credential is used for this order only."
     : p.path === "vic_setup_required" ? "To pay with this Visa through agent payments, set it up once with a simulated passkey, or choose another card."
     : p.path === "provider_handoff" ? "After you approve, a Simulated Secure Payment Provider page opens to take the card. ShopSphere and Talkshop never see the card number."
-    : `Saved card payment through ShopSphere's payment gateway: ${p.card?.display ?? "card"} on the simulated ${p.network ?? "card"} network, ${p.issuer ?? "simulated issuer"}.`;
+    : `Saved card payment: you approve with a passkey (simulated), then ShopSphere's payment gateway charges ${p.card?.display ?? "card"} on the simulated ${p.network ?? "card"} network, ${p.issuer ?? "simulated issuer"}.`;
   return (
     <p className={cx("rounded-xl px-3 py-2 text-xs leading-relaxed", p.path === "vic" ? "bg-good-soft text-good"
       : p.path === "vic_setup_required" ? "bg-gold-soft text-gold" : "bg-panel text-muted")}>{text}</p>

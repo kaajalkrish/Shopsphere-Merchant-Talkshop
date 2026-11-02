@@ -10,9 +10,10 @@ authorized → order confirmed.
 Typed text is read deterministically where the answer is predictable
 (parse.py), otherwise the LLM chooses an action (brain.decide) from those the
 current stage allows (state.ALLOWED). Payment happens ONLY for the explicit
-{"type": "go_ahead"} action. Typed "go ahead" on the Visa agent-payment path
-asks the panel to start the simulated passkey approval (it never pays by
-itself); on the standard path it re-shows the review card.
+{"type": "go_ahead"} action. On every saved card (the Visa agent-payment path
+and any other network) the go-ahead first asks the panel for the cardholder's
+simulated passkey approval; typed "go ahead" starts that approval too (it never
+pays by itself). Wallet and new-card payments re-show the review card.
 """
 import asyncio
 import logging
@@ -361,6 +362,46 @@ async def _confirm_variant(t: Turn, lead: str = "") -> None:
     t.stage(Stage.OFFER_CHECKOUT)
 
 
+DEPARTMENT_CHIPS = {"shoes": "Show me shoes", "clothing": "Show me clothing",
+                    "accessories": "Show me accessories", "electronics": "Show me electronics"}
+
+
+async def _keep_shopping(t: Turn) -> None:
+    """The shopper wants to carry on shopping before paying ("can I add more items?").
+    Keep what they chose, keep any order in progress (nothing charged), and ask what to
+    add next, based on the conversation so far, with a way back to the order."""
+    s = t.s
+    if s.checkout_id and s.stage in (Stage.AWAITING_CONSENT, Stage.CHECKOUT_DETAILS):
+        co = tools.get_checkout(s.user_id, s.checkout_id)
+        session = (co.get("provider_session") or {}).get("payment_session_id")
+        if co.get("status") == "awaiting_payment" and session:
+            await tools.abandon_provider(t.user, s.checkout_id, session)    # no payment left open
+    cart = {ln["line_id"]: ln for ln in tools.get_cart(s.user_id)["lines"]}
+    mine = [cart[lid] for lid in s.line_ids if lid in cart]
+    t.guard("VibeCheck", "Keep shopping", "info", "Shopper wants to add more before paying: cart and order kept, "
+            "nothing charged, no search run on the sentence", "MCP-style tool choice")
+    if not mine:
+        t.say("Of course! What would you like to find?")
+        t.emit("suggestions", chips=list(DEPARTMENT_CHIPS.values()), chip_actions={})
+        t.stage(Stage.GREETING)
+        return
+    last = mine[-1]
+    bits = [b for b in (f"size {last['size']}" if last.get("size") else None,
+                        (last.get("color") or "").lower() or None) if b]
+    item = last["name"] + (f" ({', '.join(bits)})" if bits else "")
+    more = len(mine) - 1
+    have = item + (f" and {more} more item{'s' if more > 1 else ''}" if more else "")
+    product = tools.get_product(last["product_id"]) or {}
+    dept = (product.get("department") or "").lower()
+    kind = (product.get("category") or dept or "items").replace("_", " ")
+    saved = " and your order is saved" if s.checkout_id else ""
+    t.say(f"Of course! Your {have} {'stay' if more else 'stays'} in your cart{saved}. "
+          f"What would you like to add: more {kind}, or something else?")
+    chips = [f"More {kind}"] + [c for d, c in DEPARTMENT_CHIPS.items() if d != dept][:2] + ["Back to my order"]
+    t.emit("suggestions", chips=chips, chip_actions={"Back to my order": {"type": "back_to_order"}})
+    t.stage(Stage.IN_CART)
+
+
 async def _checkout(t: Turn, guest: bool = False) -> None:
     """guest is ignored: guest checkout is retired (decision Q11)."""
     s = t.s
@@ -417,7 +458,7 @@ def _review_line(co: dict) -> str:
     path = (co.get("payment_path") or {}).get("path")
     offer = co.get("offer")
     saving = f" Your Chase card offer saves ${offer['discount']:.2f}." if offer else ""
-    if path == "vic":
+    if path in ("vic", "standard"):
         return (f"Here's your order.{saving} Review it, then tap Approve and pay. You'll confirm with a "
                 "simulated passkey.")
     if path == "vic_setup_required":
@@ -494,13 +535,29 @@ async def _details_added(t: Turn, action: dict) -> None:
 async def _update_checkout(t: Turn, changes: dict) -> None:
     s = t.s
     changes = {k: v for k, v in changes.items()
-               if k in ("delivery_method", "address_id", "payment_method_id", "pay_with", "points_used", "quantities")
+               if k in ("delivery_method", "address_id", "payment_method_id", "pay_with", "points_used", "quantities",
+                        "remove_line_ids")
                and v is not None}
+    removed = []
+    if changes.get("remove_line_ids"):
+        ids = [str(x)[:40] for x in changes["remove_line_ids"]][:20]
+        changes["remove_line_ids"] = ids
+        before = tools.get_checkout(s.user_id, s.checkout_id)
+        removed = [ln for ln in before["lines"] if ln["line_id"] in ids]
     try:
         co = tools.update_checkout(s.user_id, s.checkout_id, **changes)
     except CheckoutError as exc:
         t.say(exc.message)
         return
+    if removed:
+        # Out of this order (and this chat's next checkout); still in the ShopSphere cart.
+        gone = {ln["line_id"] for ln in removed}
+        s.line_ids = [lid for lid in s.line_ids if lid not in gone]
+        names = " and ".join(ln["name"] for ln in removed)
+        t.guard("CartUp", "Item removed", "pass", f"{len(removed)} item(s) taken out of this order; total, offers and "
+                f"version recalculated by ShopSphere (version {co.get('checkout_version')})", "ACP-style update checkout")
+        t.say(f"Removed {names} from this order. It's still in your ShopSphere cart if you want it later. "
+              f"New total: ${co['total']:.2f}.")
     if not co.get("ready"):                      # explain a disabled Approve & Pay instead of leaving it greyed out
         reasons = " ".join(i.get("message") or "" for i in co.get("issues", []) if i.get("message"))
         if reasons:
@@ -531,7 +588,7 @@ def _nice_date(iso) -> str:
 
 async def _go_ahead(t: Turn, user: CurrentUser, checkout_id: Optional[str], consent_mode: str = "button",
                     instruction_id: Optional[str] = None, approved: Optional[dict] = None,
-                    return_url: Optional[str] = None) -> None:
+                    return_url: Optional[str] = None, approval_id: Optional[str] = None) -> None:
     """The consent gate. Reachable only from the explicit Approve-and-pay action.
     CH-4: the approval is scoped to the invoice the shopper approved — the version
     and total on the review card they tapped (approved), else the one Talkshop last
@@ -551,12 +608,32 @@ async def _go_ahead(t: Turn, user: CurrentUser, checkout_id: Optional[str], cons
         t.say(_review_line(co))
         t.emit("agent_pay_setup", checkout_id=s.checkout_id, card_account_id=co["payment_path"].get("card_account_id"))
         return
+    tapped = approved or {}
+    if path in ("vic", "standard") and not (instruction_id or approval_id) and (
+            (tapped.get("checkout_version") is not None and int(tapped["checkout_version"]) != co.get("checkout_version"))
+            or (tapped.get("final_amount") is not None and abs(float(tapped["final_amount"]) - co["total"]) > 0.005)):
+        # CH-4: an older review card was tapped. Say so before any passkey prompt.
+        t.guard("GreenLight", "Consent scope", "blocked", "Tapped an older version of this order: nothing approved "
+                "or charged", "AP2-style consent")
+        t.say(f"Your order changed since that review card, so nothing was charged. Please review the new total of "
+              f"${co['total']:.2f} and approve again.")
+        t.emit("checkout_updated", checkout=co)
+        return
     if path == "vic" and not instruction_id:
         # The member approves with a simulated passkey, directly with ShopSphere's
         # payment-instruction service; Talkshop never sees the challenge.
         t.guard("GreenLight", "Authenticated instruction needed", "info",
                 "Visa agent payment: the member confirms this exact order with a simulated passkey", "VIC-inspired")
-        t.emit("approval_required", checkout_id=s.checkout_id, consent_mode=consent_mode,
+        t.emit("approval_required", checkout_id=s.checkout_id, consent_mode=consent_mode, kind="vic",
+               amount=co["total"], currency=co["currency"], merchant="ShopSphere", payment=card)
+        return
+    if path == "standard" and not approval_id:
+        # Every other saved card (Mastercard, Amex, Discover, Visa without agent payments):
+        # the same simulated passkey step, directly with ShopSphere; Talkshop never sees it.
+        t.guard("GreenLight", "Cardholder approval needed", "info",
+                f"Saved card ({card}): the cardholder confirms this exact order with a simulated passkey",
+                "Simulated passkey (every card)")
+        t.emit("approval_required", checkout_id=s.checkout_id, consent_mode=consent_mode, kind="card",
                amount=co["total"], currency=co["currency"], merchant="ShopSphere", payment=card)
         return
     shown = s.shown_invoice if s.shown_invoice and s.shown_invoice.get("checkout_id") == s.checkout_id else {}
@@ -568,7 +645,8 @@ async def _go_ahead(t: Turn, user: CurrentUser, checkout_id: Optional[str], cons
     t.status("PayIt", "Running 12 security checks and authorizing payment…")
     try:
         # return_url: the store page embedding the provider's page (it gets told when the payment is done)
-        result = await tools.confirm_and_pay(user, s.checkout_id, consent_mode, instruction_id, scope, return_url)
+        result = await tools.confirm_and_pay(user, s.checkout_id, consent_mode, instruction_id, scope, return_url,
+                                             approval_id)
     except CheckoutError as exc:
         t.guard("GreenLight", "Ready to pay", "blocked", exc.message, "AP2-style")
         t.emit("payment_status", state="failed", payment=card, reason=exc.code, message=exc.message)
@@ -778,8 +856,10 @@ async def _handle_action(t: Turn, user: CurrentUser, action: dict) -> None:
         # Back after signing in: add the item chosen before (stock is checked again).
         await _confirm_variant(t, "Welcome back!")
     elif kind == "keep_shopping":
-        t.say("No problem — it's saved in your ShopSphere cart. What else can I find for you?")
-        t.stage(Stage.IN_CART)
+        await _keep_shopping(t)
+    elif kind == "back_to_order" and s.stage != Stage.PAYING:
+        # After browsing a little more: review again with everything chosen in this chat.
+        await _checkout(t)
     elif kind == "update_checkout" and s.stage == Stage.AWAITING_CONSENT:
         await _update_checkout(t, action)
     elif kind == "details_added" and s.stage == Stage.CHECKOUT_DETAILS and s.checkout_id:
@@ -796,10 +876,11 @@ async def _handle_action(t: Turn, user: CurrentUser, action: dict) -> None:
     elif kind == "go_ahead":
         mode = "typed" if action.get("consent") == "typed" else "button"
         iid = action.get("instruction_id")
+        aid = action.get("approval_id")
         approved = {"checkout_version": action.get("checkout_version"), "final_amount": action.get("final_amount"),
                     "currency": action.get("currency")}
         await _go_ahead(t, user, action.get("checkout_id"), mode, str(iid)[:80] if iid else None, approved,
-                        str(action.get("return_url") or "")[:300] or None)
+                        str(action.get("return_url") or "")[:300] or None, str(aid)[:80] if aid else None)
     elif kind == "provider_complete" and s.stage == Stage.AWAITING_CONSENT:
         await _provider_complete(t, user, action.get("checkout_id"), str(action.get("payment_session_id") or "")[:80])
     elif kind == "provider_abandon" and s.stage == Stage.AWAITING_CONSENT:
@@ -808,7 +889,7 @@ async def _handle_action(t: Turn, user: CurrentUser, action: dict) -> None:
         if s.checkout_id:
             tools.record_approval_cancelled(s.user_id, s.checkout_id, "PASSKEY_CANCELLED")
         t.guard("GreenLight", "Approval cancelled", "info", "Passkey step cancelled: nothing approved or charged "
-                "(recorded as APPROVAL_CANCELLED)", "VIC-inspired")
+                "(recorded as APPROVAL_CANCELLED)", "Simulated passkey")
         t.say("No problem. Nothing was approved or charged; your order is still here when you're ready.")
     elif kind == "agent_pay_ready" and s.stage == Stage.AWAITING_CONSENT and s.checkout_id:
         co = tools.get_checkout(s.user_id, s.checkout_id)
@@ -898,10 +979,35 @@ async def _handle_text(t: Turn, text: str) -> None:
         t.say(block_msg or "I can only help with shopping at ShopSphere.")
         return
 
+    # "Can I add more items / continue shopping?" with no product named: carry on shopping
+    # (never a search for the sentence itself).
+    if (s.stage in (Stage.AWAITING_CONSENT, Stage.CHECKOUT_DETAILS, Stage.OFFER_CHECKOUT, Stage.IN_CART,
+                    Stage.VARIANT_CONFIRMED)
+            and parse.wants_more_shopping(text) and not parse.search_intent(text)):
+        t.guard("VibeCheck", "Action allowed at this stage", "pass",
+                f"Keep shopping (no product named); allowed in stage {s.stage.value}", "MCP-style tool choice")
+        return await _keep_shopping(t)
+
+    # "Remove the Daily Runner" / "only the AirPods" at the review card: take items out of this order
+    if s.stage == Stage.AWAITING_CONSENT and s.checkout_id and parse.wants_removal(text):
+        co = tools.get_checkout(s.user_id, s.checkout_id)
+        lines = []
+        for ln in co["lines"]:          # add each product's kind so "the shoes" / "the earbuds" can be matched
+            p = tools.get_product(ln["product_id"]) or {}
+            lines.append({**ln, "department": p.get("department"), "category": p.get("category"),
+                          "subcategory": p.get("subcategory")})
+        hits = parse.lines_named(text, lines)
+        if hits:
+            if parse.keeps_only(text):
+                named = {ln["line_id"] for ln in hits}
+                hits = [ln for ln in lines if ln["line_id"] not in named]
+            if hits:
+                return await _update_checkout(t, {"remove_line_ids": [ln["line_id"] for ln in hits]})
+
     # Fast, exact paths for predictable replies
     if s.stage == Stage.AWAITING_CONSENT and parse.sounds_like_payment(text):
         co = tools.get_checkout(s.user_id, s.checkout_id)
-        if (co.get("payment_path") or {}).get("path") == "vic":
+        if (co.get("payment_path") or {}).get("path") in ("vic", "standard"):
             # Typed GO AHEAD starts the approval; the simulated passkey tap is still required.
             t.say("Great. Confirm with your passkey to approve this exact order.")
             return await _go_ahead(t, t.user, s.checkout_id, "typed")
@@ -912,9 +1018,7 @@ async def _handle_text(t: Turn, text: str) -> None:
         if parse.is_yes(text):
             return await _checkout(t)
         if parse.is_no(text):
-            t.say("No problem — it's saved in your ShopSphere cart. What else can I find for you?")
-            t.stage(Stage.IN_CART)
-            return
+            return await _keep_shopping(t)
     # Things ShopSphere doesn't sell at all: say so plainly — no unrelated
     # product cards. A mixed request still searches for the part we do sell.
     blocked = parse.not_sold(text) if s.allows("search") else None
@@ -985,8 +1089,7 @@ async def _handle_text(t: Turn, text: str) -> None:
     elif act == "checkout":
         await _checkout(t)
     elif act == "keep_shopping":
-        t.say("No problem — it's saved in your ShopSphere cart. What else can I find for you?")
-        t.stage(Stage.IN_CART)
+        await _keep_shopping(t)
     elif act == "update_checkout" and s.checkout_id:
         changes = {"delivery_method": args.get("delivery_method")}
         if args.get("quantity"):

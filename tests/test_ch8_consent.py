@@ -19,7 +19,7 @@ from backend.main import app
 from backend.shop import checkout as checkout_service
 from backend.shop import payment as payment_service
 from backend.talkshop import brain
-from tests.conftest import scoped_consent
+from tests.conftest import scoped_consent, card_passkey
 
 SKU = "SSP002-ORANGE-9"
 
@@ -147,7 +147,8 @@ def quiet_llm(monkeypatch):
 
 def turn(client, h, sid, *, text=None, action=None):
     r = client.post("/api/talkshop/turn", json={"session_id": sid, "text": text, "action": action}, headers=h)
-    return [json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    events = [json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    return card_passkey(client, h, sid, events)
 
 
 def test_talkshop_passkey_cancel_is_recorded(client, quiet_llm):

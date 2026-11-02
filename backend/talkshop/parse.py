@@ -39,6 +39,56 @@ def is_no(text: str) -> bool:
     return norm(text) in NO
 
 
+# "Can I add more items / keep shopping?" without naming a product: the shopper wants
+# to carry on shopping, not a search for the words "more items".
+MORE_SHOPPING = ("add more", "more items", "more things", "more stuff", "more products", "continue shopping",
+                 "keep shopping", "shop more", "shop some more", "shopping more", "keep browsing",
+                 "continue browsing", "browse more", "something else", "add something", "add another item",
+                 "add other items", "add a few", "few more items", "not done yet", "look around")
+
+
+def wants_more_shopping(text: str) -> bool:
+    t = norm(text)
+    return any(p in t for p in MORE_SHOPPING)
+
+
+_REMOVE = re.compile(r"\b(remove|delete|take (?:out|off)|drop|don'?t want|do not want|without|only (?:the|buy|want|get)|"
+                     r"just (?:the|buy|want|get))\b")
+_ONLY = re.compile(r"\b(only|just)\b")
+_NAME_STOP = {"the", "and", "pro", "gen", "2nd", "with", "for", "new", "size"}
+
+
+def wants_removal(text: str) -> bool:
+    """"remove the shoes", "I don't want the AirPods", "only the AirPods" at the review card."""
+    return bool(_REMOVE.search(norm(text)))
+
+
+def keeps_only(text: str) -> bool:
+    """"only the AirPods" / "just the AirPods": keep the named item, remove the rest."""
+    return bool(_ONLY.search(norm(text)))
+
+
+_SHOE_KINDS = {"shoes", "running_shoes", "sneakers", "boots"}
+
+
+def lines_named(text: str, lines: list[dict]) -> list[dict]:
+    """The order lines the shopper named: by a word of the product name ("runner", "airpods"),
+    or by its kind ("the shoes", "the earbuds") when the line carries its department,
+    category and subcategory."""
+    t = norm(text)
+    words = set(re.findall(r"[a-z0-9]+", t))
+    kind = next((cat for pattern, cat in _CATEGORY_WORDS if _wanted(pattern, t)), None)
+    hits = []
+    for ln in lines:
+        name_words = {w for w in re.findall(r"[a-z0-9]+", (ln.get("name") or "").lower())
+                      if len(w) >= 4 and w not in _NAME_STOP}
+        kinds = {ln.get("department"), ln.get("category"), ln.get("subcategory")} - {None}
+        by_kind = bool(kind) and (kind in kinds or (kind in _SHOE_KINDS and "shoes" in kinds))
+        if name_words & words or by_kind:
+            hits.append(ln)
+    return hits
+
+
 def sounds_like_payment(text: str) -> bool:
     t = norm(text)
     return any(p in t for p in PAY_PHRASES) or t in YES
@@ -263,7 +313,10 @@ _CATEGORY_WORDS = [  # longest/most specific first
     (r"sneakers?|trainers|high[- ]tops?|canvas shoes?", "sneakers"),
     (r"sandals?|flip[- ]flops?|slides|heels|pumps|dress shoes?|oxfords?|derbys?|loafers?|shoes?", "shoes"),
     (r"smart ?watch(?:es)?|apple watch|fitness (?:tracker|band)s?|watch(?:es)?", "watches"),
-    (r"head ?phones?|ear ?buds|earphones|airpods|speakers?", "electronics"),
+    # audio before phones: "earphone" / "ear phones" are earbuds, never phones
+    (r"ear ?buds?|ear ?phones?|in-?ears?|airpods?|true wireless", "earbuds"),
+    (r"head ?phones?|head ?sets?|over-?ears?|on-?ears?", "headphones"),
+    (r"speakers?|sound ?bars?", "speakers"),
     (r"smart ?phones?|iphones?|phones?|galaxy", "phones"),
     (r"laptops?|macbooks?|notebook computers?", "laptops"),
     (r"sunglasses|shades", "sunglasses"),

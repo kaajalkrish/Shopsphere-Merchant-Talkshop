@@ -7,22 +7,26 @@
  * user_verified=true (or false for the "fail" demo). The dialog says so.
  *
  * Flows built on it:
- *   approveAgentPayment(checkoutId) → payment instruction AUTHENTICATED → instruction id
+ *   approveAgentPayment(checkoutId) → Visa agent path: payment instruction AUTHENTICATED → instruction id
+ *   approveCardPayment(checkoutId)  → every other saved card (Mastercard, Amex, Discover, Visa):
+ *                                     the cardholder's verified approval for this exact order → approval id
  *   enrollAgentPay(cardAccountId)   → agent token ACTIVE
  */
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
 import { Fingerprint, ShieldCheck, X } from "lucide-react";
 import { vic } from "../api/member";
-import { money } from "../api/shop";
+import { money, shop } from "../api/shop";
 
 type Outcome = "verified" | "failed" | "cancelled";
-interface Prompt { title: string; lines: [string, string][]; purpose: "payment" | "enrollment" }
+interface Prompt { title: string; lines: [string, string][]; purpose: "payment" | "enrollment"; visa: boolean }
 
 interface PasskeyContextValue {
   /** Visa path: create the instruction for this exact checkout and authenticate it.
    *  Resolves to the instruction id, or throws (cancelled / failed / server refusal). */
   approveAgentPayment: (checkoutId: string, info: { amount: number; card?: string },
                         consentMode?: "button" | "typed") => Promise<string>;
+  /** Any other saved card: the same passkey step, network-neutral (no VIC). Resolves to the approval id. */
+  approveCardPayment: (checkoutId: string, info: { card?: string }) => Promise<string>;
   enrollAgentPay: (cardAccountId: string, card: string) => Promise<void>;
   open: boolean;
 }
@@ -45,7 +49,7 @@ export function PasskeyProvider({ children }: { children: ReactNode }) {
                                                  consentMode: "button" | "typed" = "button") => {
     const { instruction, passkey } = await vic.createInstruction(checkoutId, consentMode);
     const outcome = await ask({
-      title: "Approve this payment", purpose: "payment",
+      title: "Approve this payment", purpose: "payment", visa: true,
       lines: [["Merchant", "ShopSphere"], ["Amount", money(instruction.amount)], ["Card", info.card ?? "Visa"],
               ["Agent", "Talkshop AI (one purchase only)"]],
     });
@@ -57,10 +61,22 @@ export function PasskeyProvider({ children }: { children: ReactNode }) {
     return instruction.instruction_id;
   }, [ask]);
 
+  const approveCardPayment = useCallback(async (checkoutId: string, info: { card?: string }) => {
+    const { approval, passkey } = await shop.startCardApproval(checkoutId);
+    const outcome = await ask({
+      title: "Approve this payment", purpose: "payment", visa: false,
+      lines: [["Merchant", "ShopSphere"], ["Amount", money(approval.amount)], ["Card", approval.card ?? info.card ?? "Saved card"],
+              ["Approves", "This exact order, once"]],
+    });
+    if (outcome === "cancelled") throw new PasskeyCancelled("Approval cancelled. Nothing was charged.");
+    await shop.verifyCardApproval(checkoutId, approval.approval_id, passkey, outcome === "verified");   // throws on failure
+    return approval.approval_id;
+  }, [ask]);
+
   const enrollAgentPay = useCallback(async (cardAccountId: string, card: string) => {
     const { passkey } = await vic.enrollStart(cardAccountId);
     const outcome = await ask({
-      title: "Set up Visa agent payments", purpose: "enrollment",
+      title: "Set up Visa agent payments", purpose: "enrollment", visa: true,
       lines: [["Card", card], ["Agent", "Talkshop AI"], ["What it allows", "Purchases you approve, one at a time"]],
     });
     if (outcome === "cancelled") throw new PasskeyCancelled("Setup cancelled.");
@@ -68,7 +84,7 @@ export function PasskeyProvider({ children }: { children: ReactNode }) {
   }, [ask]);
 
   return (
-    <PasskeyContext.Provider value={{ approveAgentPayment, enrollAgentPay, open: !!prompt }}>
+    <PasskeyContext.Provider value={{ approveAgentPayment, approveCardPayment, enrollAgentPay, open: !!prompt }}>
       {children}
       {prompt && <PasskeyDialog prompt={prompt} onAnswer={answer} />}
     </PasskeyContext.Provider>
@@ -86,7 +102,10 @@ function PasskeyDialog({ prompt, onAnswer }: { prompt: Prompt; onAnswer: (o: Out
           </button>
           <p className="text-[10px] font-semibold tracking-[0.18em] text-gold uppercase">Simulated passkey authentication</p>
           <h2 id="passkey-title" className="text-lg font-semibold mt-1">{prompt.title}</h2>
-          <p className="text-xs text-white/70 mt-1">Demo only: not a real Visa passkey and not WebAuthn.</p>
+          <p className="text-xs text-white/70 mt-1">
+            {prompt.visa ? "Demo only: not a real Visa passkey and not WebAuthn."
+              : "Demo only: not a real passkey and not WebAuthn. Your card issuer isn't contacted at this step."}
+          </p>
         </div>
         <div className="p-5 flex flex-col gap-4">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">

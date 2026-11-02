@@ -175,17 +175,20 @@ function Conversation({ ts, sheetOpen, onOpenSheet }: { ts: ReturnType<typeof us
   const lastApproval = lastIndex(events, "approval_required");
   const lastSetup = lastIndex(events, "agent_pay_setup");
   const lastHandoff = lastIndex(events, "provider_handoff");
-  const { approveAgentPayment, enrollAgentPay } = usePasskey();
+  const { approveAgentPayment, approveCardPayment, enrollAgentPay } = usePasskey();
   const member = useMember();
   const [vicError, setVicError] = useState<string | null>(null);
 
-  // Visa path: ShopSphere's own passkey prompt approves this exact order; Talkshop
-  // only receives the resulting instruction id with the go-ahead.
+  // Every saved card: ShopSphere's own passkey prompt approves this exact order; Talkshop only
+  // receives the resulting id with the go-ahead (Visa agent path: instruction; other cards: approval).
   const approve = async (ev: Extract<TalkEvent, { type: "approval_required" }>) => {
     setVicError(null);
     try {
-      const id = await approveAgentPayment(ev.checkout_id, { amount: ev.amount, card: ev.payment ?? undefined }, ev.consent_mode);
-      ts.send({ action: { type: "go_ahead", checkout_id: ev.checkout_id, instruction_id: id, label: "Approved with passkey" } });
+      const card = ev.payment ?? undefined;
+      const proof = ev.kind === "card"
+        ? { approval_id: await approveCardPayment(ev.checkout_id, { card }) }
+        : { instruction_id: await approveAgentPayment(ev.checkout_id, { amount: ev.amount, card }, ev.consent_mode) };
+      ts.send({ action: { type: "go_ahead", checkout_id: ev.checkout_id, ...proof, label: "Approved with passkey" } });
     } catch (e) {
       if (e instanceof PasskeyCancelled) ts.send({ action: { type: "approval_cancelled", label: "Cancelled the approval" } });
       else setVicError(e instanceof ShopError ? `${e.message} Nothing was charged.` : "Approval failed. Nothing was charged.");
@@ -323,6 +326,7 @@ const GUARDRAILS: { step: string; agent: string; checks: string[] }[] = [
     "Changing the order cancels any open Visa instruction"] },
   { step: "Approve", agent: "GreenLight · consent (the mandate)", checks: [
     "Only the shopper's own tap approves (Approve & Pay / Continue to Secure Payment); no automatic or countdown payment",
+    "Every saved card (Visa, Mastercard, Amex, Discover): the cardholder confirms this exact order with a simulated passkey, single use, bound to version + total",
     "Consent scoped to action PAY · merchant · order · amount · currency · checkout version; a changed order is refused (STALE_CHECKOUT)",
     "Live stock, price and Chase-benefit revalidation against the selected card",
     "Spending policy: approved merchant, USD, up to $2,500",
@@ -331,6 +335,7 @@ const GUARDRAILS: { step: string; agent: string; checks: string[] }[] = [
   { step: "Approve", agent: "PayIt · payment", checks: [
     "Token signature verified, token used once, then the 12 DPAT checks before any charge",
     "One route: saved card (any network) · Visa agent payment (agent-pay capable Visa only) · new card on the Secure Payment Sheet · wallet",
+    "Saved card route: the cardholder's verified passkey approval is claimed once before the card token is used",
     "Visa route: passkey-authenticated instruction, 12 VIC-inspired controls, one-time purchase credential",
     "New card: provider-owned page in the sheet (test cards only), card tokenized and verified by the provider; Talkshop sees only network + last 4",
     "New card: result checked server-to-server, then PayIt authorizes once; closing the sheet or cancelling verification = back to review, nothing charged",
@@ -355,7 +360,7 @@ const PROTOCOLS: { step: string; name: string; what: string; where: string }[] =
   { step: "Approve · new card", name: "PSP", what: "Payment provider's hosted page (Secure Payment Sheet)",
     where: "Simulated Secure Payment Provider page inside the sheet: test cards only, card tokenized and verified by the provider; ShopSphere gets a token, network and last 4, and PayIt asks for the authorization. A simulation of the flow, not a PCI boundary." },
   { step: "Approve · saved card", name: "Gateway", what: "Saved card through the payment gateway",
-    where: "Saved card token (no card number) → simulated gateway → simulated card network (Visa, Mastercard, Amex, Discover) → simulated issuer, with an idempotency key." },
+    where: "The cardholder first confirms with a simulated passkey (same step on every network; not a network protocol, the issuer isn't contacted). Then the saved card token (no card number) → simulated gateway → simulated card network (Visa, Mastercard, Amex, Discover) → simulated issuer, with an idempotency key." },
   { step: "Done", name: "ACP", what: "Complete checkout: order and updates",
     where: "ACP-style complete: the order is created once, only after authorization; confirmation email and UCP-inspired order tracking." },
 ];

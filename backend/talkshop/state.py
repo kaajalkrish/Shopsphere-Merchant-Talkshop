@@ -49,10 +49,10 @@ ALLOWED = {
     Stage.ASK_SIZE: {"choose_option", "search", "answer", "select_product"},
     Stage.ASK_COLOR: {"choose_option", "search", "answer", "select_product"},
     Stage.VARIANT_CONFIRMED: {"search", "answer"},
-    Stage.IN_CART: {"checkout", "search", "answer", "select_product"},
+    Stage.IN_CART: {"checkout", "keep_shopping", "search", "answer", "select_product"},
     Stage.OFFER_CHECKOUT: {"checkout", "keep_shopping", "search", "answer", "select_product"},
-    Stage.CHECKOUT_DETAILS: {"cancel_checkout", "answer", "search"},
-    Stage.AWAITING_CONSENT: {"update_checkout", "cancel_checkout", "answer", "search"},
+    Stage.CHECKOUT_DETAILS: {"cancel_checkout", "keep_shopping", "answer", "search"},
+    Stage.AWAITING_CONSENT: {"update_checkout", "cancel_checkout", "keep_shopping", "answer", "search"},
     Stage.PAYING: set(),
     Stage.ORDER_CONFIRMED: {"search", "answer", "select_product"},
 }

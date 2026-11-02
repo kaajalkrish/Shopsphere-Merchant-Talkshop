@@ -6,6 +6,7 @@ scoped: tests that execute real purchases deduct from the wallet, and a
 shared session-scoped user would eventually hit INSUFFICIENT_BALANCE
 partway through the suite depending on run order.
 """
+import json
 import re
 import os
 import tempfile
@@ -144,8 +145,39 @@ def scoped_consent(client, headers: dict, checkout_id: str, **extra) -> dict:
     """CH-4: the confirm body a shopper sends after looking at the final invoice:
     action PAY + the checkout version, final amount and currency they were shown."""
     co = client.get(f"/api/checkouts/{checkout_id}", headers=headers).json()
+    if (co.get("payment_path") or {}).get("route") == "saved_card" and co.get("status") == "open" \
+            and "approval_id" not in extra:
+        extra["approval_id"] = card_approval(client, headers, checkout_id)    # the cardholder's passkey tap
     return {"consent": True, "action": "PAY", "checkout_version": co.get("checkout_version"),
             "final_amount": co.get("total"), "currency": co.get("currency"), **extra}
+
+
+def card_passkey(client, headers: dict, sid: str, events: list[dict]) -> list[dict]:
+    """What the Talkshop panel does after a TAPPED go-ahead on a saved card: ShopSphere asks
+    for the cardholder's passkey (approval_required, kind "card"); the panel runs it with
+    ShopSphere directly and sends the go-ahead again with the approval id. A typed GO AHEAD
+    is left for the test to answer, so it can check that typing alone never pays."""
+    req = next((e for e in events if e.get("type") == "approval_required" and e.get("kind") == "card"
+                and e.get("consent_mode") == "button"), None)
+    if not req:
+        return events
+    aid = card_approval(client, headers, req["checkout_id"])
+    r = client.post("/api/talkshop/turn", headers=headers, json={"session_id": sid, "action": {
+        "type": "go_ahead", "checkout_id": req["checkout_id"], "approval_id": aid}})
+    assert r.status_code == 200, r.text
+    return events + [json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+
+
+def card_approval(client, headers: dict, checkout_id: str, verified: bool = True) -> str:
+    """Saved card (any network): start the simulated passkey approval for this exact order
+    and tap it, as the browser does. Returns the approval id for confirm."""
+    r = client.post(f"/api/checkouts/{checkout_id}/approval", headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    aid = body["approval"]["approval_id"]
+    client.post(f"/api/checkouts/{checkout_id}/approval/{aid}/verify", headers=headers,
+                json={"nonce": body["passkey"]["nonce"], "user_verified": verified})
+    return aid
 
 
 @pytest.fixture

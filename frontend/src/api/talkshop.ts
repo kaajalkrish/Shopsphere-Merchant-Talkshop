@@ -36,8 +36,9 @@ export type TalkEvent =
   /** One guardrail decision for the live trace (info view). */
   | { type: "guardrail"; agent: string; check: string; result: "pass" | "blocked" | "info"; detail: string; protocol: string;
       layer?: "local" | "simulated" }
-  /** Visa agent-payment path: the member must confirm this exact order with a simulated passkey (Part 2). */
-  | { type: "approval_required"; checkout_id: string; consent_mode: "button" | "typed";
+  /** Every saved card: the member confirms this exact order with a simulated passkey. kind "vic": Visa agent
+   *  payment (payment instruction); kind "card": any other saved card (cardholder approval). */
+  | { type: "approval_required"; checkout_id: string; consent_mode: "button" | "typed"; kind?: "vic" | "card";
       amount: number; currency: string; merchant: string; payment: string | null }
   /** Persona E: agent payments must be set up for this Visa before paying through Talkshop. */
   | { type: "agent_pay_setup"; checkout_id: string; card_account_id: string }
@@ -47,10 +48,10 @@ export type TalkAction =
   | { type: "greet" }
   | { type: "select" | "ask_about"; product_id: string }
   | { type: "choose_size" | "choose_color"; value: string }
-  | { type: "checkout"; guest?: boolean } | { type: "keep_shopping" } | { type: "cancel_checkout" }
-  | { type: "update_checkout"; delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number> }
+  | { type: "checkout"; guest?: boolean } | { type: "keep_shopping" } | { type: "back_to_order" } | { type: "cancel_checkout" }
+  | { type: "update_checkout"; delivery_method?: string; address_id?: string; payment_method_id?: string; pay_with?: "card" | "wallet" | "provider"; points_used?: number; quantities?: Record<string, number>; remove_line_ids?: string[] }
   // Only from the member's Approve and pay tap (consent "typed": GO AHEAD typed on the Visa path, still needs the passkey)
-  | { type: "go_ahead"; checkout_id: string; consent?: "typed"; instruction_id?: string;
+  | { type: "go_ahead"; checkout_id: string; consent?: "typed"; instruction_id?: string; approval_id?: string;
       /** CH-4: the invoice the shopper approved (the server compares; nothing is charged if it changed) */
       checkout_version?: number; final_amount?: number; currency?: string;
       /** CH-6: this page's address, so the payment provider's embedded form can tell it when it's done */

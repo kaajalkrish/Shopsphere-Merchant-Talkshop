@@ -178,11 +178,24 @@ def get_checkout(db: Session, user_id: str, checkout_id: str) -> Checkout:
 def update_checkout(db: Session, user_id: str, checkout_id: str, *, delivery_method: Optional[str] = None,
                     address_id: Optional[str] = None, payment_method_id: Optional[str] = None,
                     pay_with: Optional[str] = None, points_used: Optional[int] = None,
-                    quantities: Optional[dict[str, int]] = None) -> Checkout:
-    """Changes made on the review screen. Only an open checkout can change."""
+                    quantities: Optional[dict[str, int]] = None,
+                    remove_line_ids: Optional[list[str]] = None) -> Checkout:
+    """Changes made on the review screen. Only an open checkout can change. Removing an
+    item takes it out of this order only (it stays in the cart); the last item can't be
+    removed, the order is cancelled instead. Totals, offers and the version follow."""
     co = get_checkout(db, user_id, checkout_id)
     if co.status != "open":
         raise CheckoutError("CHECKOUT_CLOSED", f"This checkout is {co.status} and can't be changed.", 409)
+    if remove_line_ids:
+        lines = _lines(co)
+        drop = set(remove_line_ids)
+        if drop - {ln["line_id"] for ln in lines}:
+            raise CheckoutError("UNKNOWN_LINE", "That item isn't part of this checkout.", 404)
+        keep = [ln for ln in lines if ln["line_id"] not in drop]
+        if not keep:
+            raise CheckoutError("LAST_ITEM", "That's the only item in this order. To stop here, cancel the order "
+                                             "instead.", 409)
+        co.lines_json = json.dumps(keep)
     if delivery_method is not None:
         if delivery_method not in DELIVERY_LABELS:
             raise CheckoutError("INVALID_DELIVERY", "Delivery must be standard or express.")

@@ -95,7 +95,9 @@ def _relevance(p: Product, query_words: set[str], phrase: str) -> float:
     tags = _tags(p)
     score = 0.0
     if phrase:
-        score += sum(5 for t in tags if t in phrase)          # whole tag phrase in the request, e.g. "everyday running"
+        # whole tag phrase in the request, e.g. "everyday running" — as whole words, so the tag
+        # "phone" doesn't match inside "earphone"
+        score += sum(5 for t in tags if re.search(rf"{re.escape(t)}", phrase))
     tag_words = {w for t in tags for w in _words(t)}
     score += 2 * len(query_words & tag_words)
     score += 2 * len(query_words & _words(f"{p.name} {p.brand or ''}"))

@@ -17,6 +17,7 @@ from backend.db.init_db import get_engine
 from backend.db.schema import ProductVariant
 from backend.main import app
 from backend.talkshop import brain
+from tests.conftest import card_passkey
 
 PROTOCOL_NAMES = re.compile(r"\b(ACP|AP2|UCP|VIC|MCP|A2A)\b")
 
@@ -55,7 +56,8 @@ def login(client, email):
 
 def turn(client, h, sid, *, text=None, action=None):
     r = client.post("/api/talkshop/turn", json={"session_id": sid, "text": text, "action": action}, headers=h)
-    return [json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    events = [json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    return card_passkey(client, h, sid, events)
 
 
 def buy(client, h):

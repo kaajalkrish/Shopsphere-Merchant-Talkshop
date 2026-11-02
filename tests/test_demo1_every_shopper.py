@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from backend.db.init_db import get_engine
 from backend.db.schema import EmailOutbox, Order, PaymentMethod, User, Wallet
 from backend.main import app
-from tests.conftest import pay_with_provider, scoped_consent, add_card
+from tests.conftest import pay_with_provider, scoped_consent, add_card, card_passkey
 
 HOME = {"full_name": "Test Shopper", "line1": "1 Main St", "city": "Austin", "state": "TX", "postal_code": "78701"}
 CARD = {"number": "4242 4242 4242 4242", "exp_month": 12, "exp_year": 2030, "cvc": "123", "cardholder_name": "Test"}
@@ -260,7 +260,8 @@ def quiet_llm(monkeypatch):
 def say(client, h, sid, **kw):
     r = client.post("/api/talkshop/turn", json={"session_id": sid, **kw}, headers=h)
     assert r.status_code == 200, r.text
-    return [_json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    events = [_json.loads(l[6:]) for b in r.text.split("\n\n") for l in b.splitlines() if l.startswith("data: ")]
+    return card_passkey(client, h, sid, events)
 
 
 def first(ev, kind):

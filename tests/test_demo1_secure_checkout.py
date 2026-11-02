@@ -16,7 +16,7 @@ from backend.payment import mock_processor
 from backend.shop import orders as order_service
 from backend.talkshop import brain
 from backend.talkshop import state as talk_state
-from tests.conftest import add_card
+from tests.conftest import add_card, card_passkey
 
 SPEC_REQUEST = "I need running shoes under $150 for everyday running."
 CARD = "4242 4242 4242 4242"
@@ -56,8 +56,9 @@ def llm(monkeypatch):
 def turn(client, headers, sid, *, text=None, action=None):
     r = client.post("/api/talkshop/turn", json={"session_id": sid, "text": text, "action": action}, headers=headers)
     assert r.status_code == 200, r.text
-    return [json.loads(line[6:]) for block in r.text.split("\n\n") for line in block.splitlines()
-            if line.startswith("data: ")]
+    events = [json.loads(line[6:]) for block in r.text.split("\n\n") for line in block.splitlines()
+              if line.startswith("data: ")]
+    return card_passkey(client, headers, sid, events)
 
 
 def of(events, kind):

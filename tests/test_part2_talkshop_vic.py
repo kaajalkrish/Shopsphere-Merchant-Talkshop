@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.talkshop import brain
+from tests.conftest import card_passkey
 from tests.test_part2_cardmember_vic import approve, member, restore_stock  # noqa: F401  (autouse fixture)
 
 SPEC_REQUEST = "I need running shoes under $150 for everyday running."
@@ -36,8 +37,9 @@ def quiet_llm(monkeypatch):
 def turn(client, h, sid, *, text=None, action=None):
     r = client.post("/api/talkshop/turn", json={"session_id": sid, "text": text, "action": action}, headers=h)
     assert r.status_code == 200, r.text
-    return [json.loads(line[6:]) for block in r.text.split("\n\n") for line in block.splitlines()
-            if line.startswith("data: ")]
+    events = [json.loads(line[6:]) for block in r.text.split("\n\n") for line in block.splitlines()
+              if line.startswith("data: ")]
+    return card_passkey(client, h, sid, events)
 
 
 def of(events, kind):
@@ -102,13 +104,17 @@ def test_unenrolled_visa_member_is_asked_to_set_up_agent_payments(client):
     assert of(ev, "checkout_updated")[0]["checkout"]["payment_path"]["path"] == "vic"
 
 
-def test_mastercard_member_pays_on_the_standard_path_without_passkey(client):
+def test_mastercard_member_pays_on_the_standard_path_with_the_cardholder_passkey(client):
+    """Same passkey step as the Visa member, but no VIC: no agent token, no instruction."""
     h, _ = member(client, "Mastercard")
     sid, co = to_review(client, h)
     ev = turn(client, h, sid, action={"type": "go_ahead", "checkout_id": co["checkout_id"]})
-    assert not of(ev, "approval_required")
+    req = of(ev, "approval_required")[0]
+    assert req["kind"] == "card" and req["payment"] and "Mastercard" in req["payment"]
     order = of(ev, "order_confirmed")[0]["order"]
     assert order["payment_path"] == "standard" and not order["cashback"]
+    guards = {g["check"]: g for g in of(ev, "guardrail")}
+    assert guards["Cardholder approval"]["result"] == "pass" and "Payment instruction" not in guards
 
 
 def test_progress_steps_are_customer_friendly(client):

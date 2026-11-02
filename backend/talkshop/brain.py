@@ -26,7 +26,7 @@ from backend.talkshop.tools import LLM_TOOLS
 log = logging.getLogger(__name__)
 
 CATEGORIES = ["running_shoes", "sneakers", "boots", "shoes", "clothing", "accessories", "bags", "sunglasses",
-              "watches", "electronics", "phones", "laptops"]
+              "watches", "electronics", "earbuds", "headphones", "speakers", "phones", "laptops"]
 
 
 # A shopper is waiting: fail fast to the deterministic fallback rather than
@@ -77,6 +77,8 @@ Rules:
 - Do NOT ask for size or colour before searching — search with what you have.
 - A question about a product shown ("is it good for flat feet?") is "answer", using only the facts given.
 - If the shopper agrees to check out, choose "checkout"; if they decline, "keep_shopping".
+- "Can I add more items", "continue shopping", "something else" WITHOUT a product named is "keep_shopping",
+  never "search". With a product named ("add some socks too"), it is "search".
 - Greetings and thanks are "answer".
 - If CONTEXT has page_product, "this", "it" or "this one" means that product. Wanting to buy it or pick its
   size/colour is "select_product" (product_index null); a question about it is "answer".

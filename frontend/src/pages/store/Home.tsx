@@ -94,7 +94,7 @@ export default function StoreHome() {
           { icon: <BadgePercent size={18} />, title: "Chase offers", text: "For Chase credit-card holders, applied at checkout" },
           { icon: <Gift size={18} />, title: m ? `${m.rewards_balance.toLocaleString()} points` : "Rewards points",
             text: m ? "100 points = $1 off products (demo points)" : "Every customer earns 1 point per $1 (demo points)" },
-          { icon: <ShieldCheck size={18} />, title: "You approve every payment", text: "Visa agent payments with passkey step-up (simulated)" },
+          { icon: <ShieldCheck size={18} />, title: "You approve every payment", text: "Every saved card confirms with a passkey (simulated)" },
         ].map((b) => (
           <div key={b.title} className="flex items-center gap-3 rounded-2xl border border-line px-5 py-4">
             <span className="w-9 h-9 rounded-full bg-accent-soft text-accent grid place-items-center shrink-0">{b.icon}</span>
