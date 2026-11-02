@@ -1,5 +1,5 @@
-# Render Blueprint — ShopSphere Demo 1 backend (FastAPI), deployed from the `production` branch.
-# The frontend is on Vercel (frontend/vercel.json). Pushing to `production` redeploys.
+# Render Blueprint — ShopSphere Demo 1 backend (FastAPI), deployed from the `main` branch.
+# The frontend is on Vercel (frontend/vercel.json). Pushing to `main` redeploys.
 #
 # No secrets in this file. Values marked `sync: false` are entered in the Render
 # dashboard when the Blueprint is created (or later under Environment).
@@ -14,7 +14,7 @@ services:
     name: shopsphere-api
     runtime: python
     plan: free
-    branch: production
+    branch: main
     autoDeployTrigger: commit
     buildCommand: pip install -r requirements.deploy.txt
     startCommand: python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT

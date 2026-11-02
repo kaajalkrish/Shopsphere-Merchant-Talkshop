@@ -33,7 +33,7 @@ it all fits together: [`docs/demo-1-system-workflow.md`](docs/demo-1-system-work
 |---|---|
 | Frontend (Vercel) | _set after the first deploy_ |
 | Backend (Render) | _set after the first deploy_ |
-| Production branch | `production` on `kaajalkrish/Shopsphere-Merchant-Talkshop`: every push redeploys both |
+| Production branch | `main` on `kaajalkrish/Shopsphere-Merchant-Talkshop`: every push redeploys both |
 
 How it is set up:
 
@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Deploying a change:** edit locally → `python -m pytest tests/` and `cd frontend; npm run build` → commit → push to
-`production` (`git push shopsphere HEAD:production`) → Vercel and Render redeploy automatically.
+`main` (`git push shopsphere HEAD:main`) → Vercel and Render redeploy automatically.
 
 ### Run it locally (development; three services)
 
