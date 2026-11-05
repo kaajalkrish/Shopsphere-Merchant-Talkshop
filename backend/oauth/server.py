@@ -50,9 +50,11 @@ def _error(status: int, error: str, description: str) -> JSONResponse:
 
 @router.get("/.well-known/oauth-protected-resource")
 @router.get("/.well-known/oauth-protected-resource/mcp")
+@router.get("/.well-known/oauth-protected-resource/shop")
 def protected_resource(request: Request):
     base = _base(request)
-    return {"resource": mcp_auth.resource_url(base), "authorization_servers": [base],
+    path = "/shop" if request.url.path.rstrip("/").endswith("/shop") else "/mcp"
+    return {"resource": mcp_auth.resource_url(base, path), "authorization_servers": [base],
             "scopes_supported": ["shop"], "bearer_methods_supported": ["header"],
             "resource_name": "ShopSphere"}
 
@@ -205,13 +207,20 @@ async def authorize_submit(request: Request):
     base = _base(request)
     code = mcp_auth.issue_code(sub=user_id, cid=params["client_id"], ru=params["redirect_uri"],
                                cc=params["code_challenge"],
-                               res=params.get("resource") or mcp_auth.resource_url(base))
+                               res=_resource(base, params.get("resource")))
     query = {"code": code, "iss": base, **({"state": params["state"]} if params.get("state") else {})}
     sep = "&" if urlparse(params["redirect_uri"]).query else "?"
     return RedirectResponse(f"{params['redirect_uri']}{sep}{urlencode(query)}", status_code=302)
 
 
 # ── Tokens ──────────────────────────────────────────────────────────────────────
+
+def _resource(base: str, wanted) -> str:
+    """The MCP address a token is for: the one the chat app asked for (/mcp or /shop)."""
+    wanted = (wanted[0] if isinstance(wanted, list) and wanted else wanted) or ""
+    wanted = str(wanted).rstrip("/")
+    return wanted if wanted in mcp_auth.resource_urls(base) else mcp_auth.resource_url(base)
+
 
 def _pkce_ok(verifier: str, challenge: str) -> bool:
     digest = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -222,9 +231,8 @@ def _pkce_ok(verifier: str, challenge: str) -> bool:
 async def token(request: Request):
     form = {k: str(v) for k, v in (await request.form()).items()}
     base = _base(request)
-    resource = mcp_auth.resource_url(base)
-    if form.get("resource") and form["resource"].rstrip("/") != resource:
-        return _error(400, "invalid_target", "This server only issues tokens for its /mcp endpoint.")
+    if form.get("resource") and form["resource"].rstrip("/") not in mcp_auth.resource_urls(base):
+        return _error(400, "invalid_target", "This server only issues tokens for its MCP endpoints.")
     grant = form.get("grant_type")
     if grant == "authorization_code":
         claims = mcp_auth.redeem_code(form.get("code", ""))
@@ -234,12 +242,14 @@ async def token(request: Request):
             return _error(400, "invalid_grant", "The code was issued to a different app.")
         if not _pkce_ok(form.get("code_verifier", ""), claims["cc"]):
             return _error(400, "invalid_grant", "PKCE verification failed.")
+        resource = _resource(base, form.get("resource") or claims.get("res"))
         return JSONResponse(mcp_auth.issue_tokens(claims["sub"], claims["cid"], resource),
                             headers={"Cache-Control": "no-store"})
     if grant == "refresh_token":
         claims = mcp_auth.read_refresh(form.get("refresh_token", ""))
         if not claims or claims.get("cid") != form.get("client_id"):
             return _error(400, "invalid_grant", "Please sign in to ShopSphere again.")
+        resource = _resource(base, form.get("resource") or claims.get("aud"))
         return JSONResponse(mcp_auth.issue_tokens(claims["sub"], claims["cid"], resource),
                             headers={"Cache-Control": "no-store"})
     return _error(400, "unsupported_grant_type", "Use authorization_code or refresh_token.")

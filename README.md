@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/mcp` ([`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop` (also `/mcp`; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
 Searching is open; cart, checkout and payment ask the shopper to sign in once with their ShopSphere account

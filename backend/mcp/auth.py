@@ -52,8 +52,17 @@ def public_base_url(headers: Optional[dict] = None) -> str:
     return f"{proto}://{h.get('x-forwarded-host') or h.get('host', 'localhost:8000')}"
 
 
-def resource_url(base: str) -> str:
-    return f"{base}/mcp"
+# The connector's addresses. /shop is the same server under a fresh address: chat apps cache a
+# connector's tool list per address, so a new one makes them load the current tools.
+MCP_PATHS = ("/mcp", "/shop")
+
+
+def resource_url(base: str, path: str = "/mcp") -> str:
+    return f"{base}{path if path in MCP_PATHS else '/mcp'}"
+
+
+def resource_urls(base: str) -> list[str]:
+    return [f"{base}{p}" for p in MCP_PATHS]
 
 
 def _issue(typ: str, ttl: int, **claims) -> str:
@@ -62,7 +71,7 @@ def _issue(typ: str, ttl: int, **claims) -> str:
                       _secret(), algorithm=ALG)
 
 
-def _read(token: str, typ: str, audience: Optional[str] = None) -> Optional[dict]:
+def _read(token: str, typ: str, audience=None) -> Optional[dict]:
     try:
         claims = jwt.decode(token, _secret(), algorithms=[ALG], audience=audience,
                             options={"verify_aud": audience is not None})
@@ -100,7 +109,7 @@ def read_refresh(token: str) -> Optional[dict]:
     return _read(token, "mcp_refresh")
 
 
-def user_for(authorization: Optional[str], resource: str) -> Optional[str]:
+def user_for(authorization: Optional[str], resource) -> Optional[str]:
     """The signed-in customer's user_id from an `Authorization: Bearer` header, or None."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
@@ -120,7 +129,7 @@ def current_customer() -> CurrentUser:
     from fastmcp.server.dependencies import get_http_headers
 
     headers = get_http_headers(include_all=True)
-    user_id = user_for(headers.get("authorization"), resource_url(public_base_url(headers)))
+    user_id = user_for(headers.get("authorization"), resource_urls(public_base_url(headers)))
     if not user_id:
         raise ToolError("Please sign in to ShopSphere first.")
     from backend.db.schema import User
@@ -137,7 +146,10 @@ class McpSignIn:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path", "").rstrip("/") != "/mcp":
+        path = scope.get("path", "").rstrip("/") if scope["type"] == "http" else ""
+        if path == "/shop":                   # same MCP server under the fresh address
+            scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
+        if scope["type"] != "http" or scope.get("method") != "POST" or path not in MCP_PATHS:
             return await self.app(scope, receive, send)
         chunks, more = [], True
         while more:
@@ -156,8 +168,8 @@ class McpSignIn:
         wanted = {(c.get("params") or {}).get("name") for c in calls
                   if isinstance(c, dict) and c.get("method") == "tools/call"}
         needs_customer = bool(wanted & CUSTOMER_TOOLS)
-        if (auth and not user_for(auth, resource_url(base))) or (needs_customer and not auth):
-            return await _challenge(send, base)
+        if (auth and not user_for(auth, resource_url(base, path))) or (needs_customer and not auth):
+            return await _challenge(send, base, path)
 
         sent = False
 
@@ -172,8 +184,8 @@ class McpSignIn:
         return await self.app(scope, replay, send)
 
 
-async def _challenge(send, base: str) -> None:
-    meta = f"{base}/.well-known/oauth-protected-resource/mcp"
+async def _challenge(send, base: str, path: str = "/mcp") -> None:
+    meta = f"{base}/.well-known/oauth-protected-resource{path if path in MCP_PATHS else '/mcp'}"
     body = json.dumps({"error": "invalid_token", "error_description": "Sign in to ShopSphere to continue."}).encode()
     await send({"type": "http.response.start", "status": 401, "headers": [
         (b"content-type", b"application/json"),

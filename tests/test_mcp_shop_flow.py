@@ -26,9 +26,9 @@ def client():
         yield c
 
 
-def rpc(client, method: str, params: dict | None = None, token: str | None = None):
+def rpc(client, method: str, params: dict | None = None, token: str | None = None, path: str = "/mcp"):
     headers = dict(MCP_HEADERS, **({"Authorization": f"Bearer {token}"} if token else {}))
-    r = client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
+    r = client.post(path, headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
     if r.status_code != 200:
         return r, None
     line = next(ln for ln in r.text.splitlines() if ln.startswith("data: "))
@@ -50,13 +50,13 @@ def pkce():
     return verifier, challenge
 
 
-def sign_in(client, email: str, password: str = "demo1234") -> str:
+def sign_in(client, email: str, password: str = "demo1234", resource: str | None = None) -> str:
     """The chat app's OAuth dance: register, show the login page, sign in, swap the code."""
     meta = client.get("/.well-known/oauth-authorization-server").json()
     reg = client.post("/oauth/register", json={"client_name": "Claude", "redirect_uris": [REDIRECT]}).json()
     verifier, challenge = pkce()
     params = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT, "state": "xyz",
-              "code_challenge": challenge, "code_challenge_method": "S256"}
+              "code_challenge": challenge, "code_challenge_method": "S256", **({"resource": resource} if resource else {})}
     page = client.get("/oauth/authorize", params=params)
     assert page.status_code == 200 and "Sign in to ShopSphere" in page.text and "Claude" in page.text
     done = client.post("/oauth/authorize", data={**params, "email": email, "password": password},
@@ -180,3 +180,19 @@ def test_paying_a_changed_order_is_refused(client):
         "checkout_id": co["checkout_id"], "checkout_version": co["checkout_version"],
         "final_amount": co["total"] - 1, "currency": co["currency"]}}, token)  # not the total the shopper saw
     assert msg["result"]["isError"]
+
+
+def test_the_fresh_shop_address_is_the_same_connector(client):
+    """/shop serves the same MCP server (a new address makes chat apps reload the tool list)."""
+    r, msg = rpc(client, "tools/list", path="/shop")
+    assert {"search_shopsphere", "add_to_cart", "checkout"} <= {t["name"] for t in msg["result"]["tools"]}
+    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, path="/shop")
+    assert r.status_code == 401 and "/.well-known/oauth-protected-resource/shop" in r.headers["www-authenticate"]
+    meta = client.get("/.well-known/oauth-protected-resource/shop").json()
+    assert meta["resource"].endswith("/shop")
+    token = sign_in(client, "chris@shopsphere.demo", resource=meta["resource"])
+    r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop")
+    assert r.status_code == 200 and not msg["result"].get("isError")
+    stray = mcp_auth.issue_tokens("USR001", "x", "https://elsewhere.example/shop")["access_token"]
+    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, stray, path="/shop")
+    assert r.status_code == 401
