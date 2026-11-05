@@ -33,7 +33,8 @@ CODE_TTL = 300
 
 # Tools that act for a signed-in customer. Everything else (search, product details) is open.
 CUSTOMER_TOOLS = {"my_shopsphere_account", "add_to_cart", "show_cart", "update_cart_line", "checkout",
-                  "update_checkout_choices", "approve_and_pay", "my_orders"}
+                  "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
+                  "finish_new_card_payment", "my_orders"}
 
 _used_codes: dict[str, float] = {}          # jti -> expiry: each authorization code works once
 

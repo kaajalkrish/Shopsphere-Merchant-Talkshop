@@ -264,3 +264,85 @@ def test_versioned_addresses_are_the_same_connector(client):
     assert r.status_code == 200 and not msg["result"].get("isError")
     r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop/v3")
     assert r.status_code == 401                       # a token is for the address it was issued to
+
+
+def sign_up(client, email: str, **fields) -> tuple[str, str]:
+    """A brand-new shopper: the chat app's sign-in page, Create an account tab. Returns (page, token)."""
+    reg = client.post("/oauth/register", json={"client_name": "Claude", "redirect_uris": [REDIRECT]}).json()
+    verifier, challenge = pkce()
+    params = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT, "state": "s1",
+              "code_challenge": challenge, "code_challenge_method": "S256"}
+    assert "Create an account" in client.get("/oauth/authorize", params=params).text
+    page = client.get("/oauth/authorize", params={**params, "mode": "signup"}).text
+    assert "Create your ShopSphere account" in page and "Shipping address" in page and "card_number" not in page
+    form = {"mode": "signup", "name": "Riya Shah", "email": email, "password": "riya-secret-1", "line1": "12 Oak St",
+            "line2": "", "city": "Austin", "state": "tx", "postal_code": "78701", **fields}
+    done = client.post("/oauth/authorize", data={**params, **form}, follow_redirects=False)
+    if done.status_code != 302:
+        return done.text, ""
+    code = parse_qs(urlparse(done.headers["location"]).query)["code"][0]
+    tok = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code,
+                                            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+                                            "code_verifier": verifier}).json()
+    return "", tok["access_token"]
+
+
+def _on_secure_page(client, hosted_url: str, card: str = "4000 0000 0000 3055", save: bool = True):
+    """The shopper on the (simulated) provider's own page, in their browser: never through the chat."""
+    path = "/psp" + hosted_url.split("/psp", 1)[1]
+    assert "Enter test card details" in client.get(path).text
+    data = {"cardholder_name": "Riya Shah", "card_number": card, "expiry": "12/30", "cvc": "123",
+            **({"save": "1"} if save else {})}
+    client.post(f"{path}/pay", data=data)
+    client.post(f"{path}/continue")
+    return client.get(path).text
+
+
+def test_a_new_shopper_signs_up_and_pays_with_a_new_card_on_the_secure_page(client):
+    email = f"riya.{secrets.token_hex(4)}@example.com"
+    _, token = sign_up(client, email)
+    me = call(client, "my_shopsphere_account", token)
+    assert me["signed_in"] and me["email"] == email and me["saved_card"] is None
+    call(client, "add_to_cart", token, product_id="SSP049", color="White")
+    r, msg = rpc(client, "tools/call", {"name": "checkout", "arguments": {}}, token)
+    co = json.loads(msg["result"]["content"][0]["text"])
+    assert "12 Oak St" in co["ship_to"] and "TX" in co["ship_to"]          # the address from sign-up
+    assert "secure payment page" in co["pay_with"]                          # no saved card: a new card
+    card = json.dumps(msg["result"]["structuredContent"])
+    assert "start_new_card_payment" in card and "I've finished paying" in card
+    st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"])
+    assert st["payable"] and st["new_card"]
+    r, msg = rpc(client, "tools/call", {"name": "start_new_card_payment", "arguments": {
+        "checkout_id": co["checkout_id"], "checkout_version": st["version"], "final_amount": st["total"],
+        "currency": st["currency"]}}, token)
+    started = json.loads(msg["result"]["content"][0]["text"])
+    assert started["status"] == "provider_handoff" and "/psp/hosted/" in started["hosted_url"]
+    # tapping "I've finished" before the card is entered changes nothing
+    r, msg = rpc(client, "tools/call", {"name": "finish_new_card_payment", "arguments": {
+        "checkout_id": co["checkout_id"], "payment_session_id": started["payment_session_id"]}}, token)
+    assert msg["result"]["isError"] and "isn't finished" in msg["result"]["content"][0]["text"]
+    assert "Payment verified" in _on_secure_page(client, started["hosted_url"])
+    paid = call(client, "finish_new_card_payment", token, checkout_id=co["checkout_id"])   # Claude can finish it too
+    assert paid["status"] == "authorized" and paid["order_id"].startswith("SS-"), paid
+    assert any(o.get("order_id") == paid["order_id"] for o in call(client, "my_orders", token)["orders"])
+    # the saved card (a provider token, network and last 4 only) pays the next order with the passkey
+    assert call(client, "my_shopsphere_account", token)["saved_card"].endswith("3055")
+    call(client, "add_to_cart", token, product_id="SSP049", color="White")
+    co2 = call(client, "checkout", token)
+    assert "3055" in co2["pay_with"]
+    assert _pay(client, token, co2["checkout_id"], call(client, "update_checkout_choices", token,
+                                                        checkout_id=co2["checkout_id"]))["status"] == "authorized"
+
+
+def test_sign_up_problems_are_shown_on_the_page_and_make_no_account(client):
+    email = f"sam.{secrets.token_hex(4)}@example.com"
+    page, token = sign_up(client, email, postal_code="ABC")
+    assert not token and "ZIP code" in page and "12 Oak St" in page        # kept what they typed
+    page, token = sign_up(client, email, password="short")
+    assert not token and "8 or more" in page
+    _, token = sign_up(client, email)
+    assert token                                                            # the email was still free
+    page, again = sign_up(client, email)
+    assert not again and "already exists" in page
+    page, token = sign_up(client, "kaajal@shopsphere.demo")
+    assert not token and "already exists" in page

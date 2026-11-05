@@ -97,6 +97,28 @@ SIGNUP_PROBE_LIMIT, SIGNUP_PROBE_WINDOW = 5, timedelta(minutes=15)
 _signup_probes: dict[str, list[datetime]] = {}
 
 
+def add_customer(session, name: str, email: str, password: str, source: Optional[str] = None) -> str:
+    """A new ShopSphere customer (wallet + points, no card details), not yet committed. Shared
+    by the website sign-up and the chat-app (MCP) sign-in page."""
+    user_id = f"USR{uuid.uuid4().hex[:6].upper()}"
+    session.add(User(user_id=user_id, name=name, email=email, password_hash=hash_password(password),
+                     status="active"))
+    session.add(Wallet(user_id=user_id, balance=STARTING_WALLET_BALANCE))
+    session.add(LoyaltyPoints(user_id=user_id, balance=0, lifetime_points=0))
+    write_audit_event(session, "CUSTOMER_SIGNUP", user_id=user_id,
+                      metadata={"chase_linked": False, "card_details_collected": False,
+                                **({"source": source} if source else {})})
+    return user_id
+
+
+def note_signup_probe(email: str) -> None:
+    _signup_probes.setdefault(email, []).append(datetime.now(timezone.utc))
+
+
+def probe_blocked(email: str) -> bool:
+    return _probe_blocked(email)
+
+
 def _probe_blocked(email: str) -> bool:
     cutoff = datetime.now(timezone.utc) - SIGNUP_PROBE_WINDOW
     recent = [t for t in _signup_probes.get(email, []) if t > cutoff]
@@ -121,18 +143,7 @@ async def register(req: RegisterRequest, authorization: Optional[str] = Header(d
             _signup_probes.setdefault(email, []).append(datetime.now(timezone.utc))
             raise HTTPException(status_code=409, detail="An account with this email already exists")
 
-        user_id = f"USR{uuid.uuid4().hex[:6].upper()}"
-        session.add(User(
-            user_id=user_id,
-            name=name,
-            email=email,
-            password_hash=hash_password(req.password),
-            status="active",
-        ))
-        session.add(Wallet(user_id=user_id, balance=STARTING_WALLET_BALANCE))
-        session.add(LoyaltyPoints(user_id=user_id, balance=0, lifetime_points=0))
-        write_audit_event(session, "CUSTOMER_SIGNUP", user_id=user_id,
-                          metadata={"chase_linked": False, "card_details_collected": False})
+        user_id = add_customer(session, name, email, req.password)
         session.commit()
 
     current = CurrentUser(user_id=user_id, name=name, email=email)

@@ -22,7 +22,7 @@ from fastmcp.apps.app import FastMCPApp
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.base import ToolResult, _prefab_to_tool_result   # fastmcp==4.0.10 (pinned)
 from mcp.types import TextContent
-from prefab_ui.actions import SendMessage, SetState, ShowToast
+from prefab_ui.actions import OpenLink, SendMessage, SetState, ShowToast
 from prefab_ui.actions.mcp import CallTool
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (Button, Card, CardContent, CardFooter, Column, Grid, H3, Image, Muted, Row,
@@ -74,6 +74,13 @@ Buying (needs the shopper's ShopSphere sign-in; the connector asks them to sign 
 6. Paying is ONLY the shopper's own Approve & pay tap on the checkout card, followed by the
    simulated passkey. You cannot pay and must never say an order is paid unless they tell you it
    went through; then my_orders shows the order and its tracking.
+7. A new card (or a shopper with no saved card) is paid on the secure payment page: on the
+   checkout card they choose "a new card", tap Approve & pay, open the secure page in their
+   browser, type the card there (they can tick Save), then tap "I've finished paying". Never ask
+   for card numbers, expiry or CVC in the chat; if they type one, tell them not to and point them
+   to the secure page. If they say they finished on that page, call finish_new_card_payment.
+8. New shoppers create their ShopSphere account on the sign-in page ("Create an account"), with
+   their shipping address.
 Payments, card networks and issuers in this demo are simulated.
 """
 
@@ -503,10 +510,13 @@ def _checkout_state(co: dict) -> dict:
         "shipping_text": _money(co.get("shipping")), "arrives": dl.get("date"),
         "tax_text": _money(co.get("tax")),
         "ship_to": f"Ship to: {(co.get('address') or {}).get('display') or 'no address yet'}",
-        "pay_with_text": "Pay with: " + ("ShopSphere Wallet" if route == "wallet" else card)
+        "pay_with_text": "Pay with: " + ("ShopSphere Wallet" if route == "wallet" else
+                                         "a new card on the secure payment page" if route == "provider_handoff"
+                                         else card)
                          + (" · Visa agent payment (VIC-inspired, simulated)" if route == "vic" else ""),
+        "new_card": route == "provider_handoff",
         "earn_text": f"You'll earn {co.get('earn_points') or 0} points with this order.",
-        "payable": bool(co.get("ready")) and route in ("saved_card", "vic", "wallet"),
+        "payable": bool(co.get("ready")) and route in ("saved_card", "vic", "wallet", "provider_handoff"),
         "problem": " ".join(i.get("message") or f"{i.get('name') or 'Item'}: {i.get('code')}"
                             for i in co.get("issues") or []),
     }
@@ -514,7 +524,7 @@ def _checkout_state(co: dict) -> dict:
 
 _REFRESHED = ("version", "total", "total_text", "subtotal_text", "has_offer", "offer_label", "offer_text",
               "has_points", "points_label", "points_text", "delivery_label", "shipping_text", "arrives", "tax_text",
-              "ship_to", "pay_with_text", "earn_text", "payable", "problem")
+              "ship_to", "pay_with_text", "new_card", "earn_text", "payable", "problem")
 
 
 def _checkout_view(co: dict) -> tuple[Column, dict]:
@@ -523,9 +533,11 @@ def _checkout_view(co: dict) -> tuple[Column, dict]:
     st = _checkout_state(co)
     pts = co.get("points") or {}
     dl = co.get("delivery") or {}
-    state = {**st, "confirming": False, "paid": False, "order_ref": "",
+    state = {**st, "confirming": False, "paid": False, "order_ref": "", "handing_off": False,
+             "hosted_url": "", "session_id": "",
              "address_id": (co.get("address") or {}).get("address_id") or "",
-             "pay_id": "wallet" if co.get("pay_with") == "wallet" else (co.get("payment_method") or {}).get("payment_method_id") or "",
+             "pay_id": co.get("pay_with") if co.get("pay_with") in ("wallet", "provider") else
+                       (co.get("payment_method") or {}).get("payment_method_id") or "",
              "delivery": dl.get("method") or "standard",
              "use_points": "yes" if co.get("points_discount") else "no"}
     S = STATE
@@ -572,8 +584,10 @@ def _checkout_view(co: dict) -> tuple[Column, dict]:
                             for c in co.get("saved_payment_methods") or []:
                                 SelectOption(value=c["payment_method_id"],
                                              label=f"Pay with {c.get('issuer_display') + ' ' if c.get('issuer_display') else ''}{c['display']}")
-                            if (co.get("wallet") or {}).get("enough"):
+                            if (co.get("wallet") or {}).get("enough") and co.get("saved_payment_methods"):
                                 SelectOption(value="wallet", label=f"Pay with ShopSphere Wallet ({_money(co['wallet'].get('balance'))})")
+                            if co.get("provider_option"):
+                                SelectOption(value="provider", label="Pay with a new card (secure payment page)")
                         with Select(name="delivery", value=state["delivery"], size="sm"):
                             for o in dl.get("options") or []:
                                 SelectOption(value=o["method"], label=f"{o['label']} delivery, arrives {o['date']}"
@@ -590,14 +604,38 @@ def _checkout_view(co: dict) -> tuple[Column, dict]:
                         onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _REFRESHED),
                                    ShowToast("Order updated", variant="success")],
                         onError=_failed_toast("Couldn't update the order")))
-                    Muted("To add a new card or address, use your ShopSphere account. Card numbers never go "
-                          "through the chat.")
+                    Muted("New card? Choose \"a new card\" above. You type it only on the secure payment page "
+                          "(and can save it there), never in the chat. New addresses: your ShopSphere account.")
             with CardFooter(), Column(gap=2):
                 with If(~S.payable):
                     Muted(f"This order can't be paid here yet. {S.problem} Fix it in your cart or choose another "
                           "card, then update the order.")
                 with If(S.payable):
-                    with If(~S.paid):
+                    with If(~S.paid), If(S.new_card):
+                        with If(~S.handing_off):
+                            Button(f"Approve & pay {S.total_text}", on_click=CallTool(
+                                "start_new_card_payment", arguments={
+                                    "checkout_id": co["checkout_id"], "checkout_version": S.version,
+                                    "final_amount": S.total, "currency": state["currency"]},
+                                onSuccess=[SetState("hosted_url", RESULT.hosted_url),
+                                           SetState("session_id", RESULT.payment_session_id),
+                                           SetState("handing_off", True), OpenLink(RESULT.hosted_url)],
+                                onError=_failed_toast("Couldn't open the secure payment page")))
+                            Muted("Next you enter your card on the secure payment page (simulated provider, test "
+                                  "cards only). Claude never sees it. Nothing is charged until you finish there.")
+                        with If(S.handing_off):
+                            Text("Finish on the secure payment page", css_class="font-medium")
+                            Muted("It opened in a new browser tab. Enter the card there (tick Save to keep it "
+                                  "for next time), then come back here.")
+                            with Row(gap=2):
+                                Button("Open secure payment page", variant="outline", on_click=OpenLink(S.hosted_url))
+                                Button("I've finished paying", variant="success", on_click=CallTool(
+                                    "finish_new_card_payment", arguments={
+                                        "checkout_id": co["checkout_id"], "payment_session_id": S.session_id},
+                                    onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
+                                               ShowToast("Payment approved", variant="success")],
+                                    onError=_failed_toast("Not finished yet")))
+                    with If(~S.paid), If(~S.new_card):
                         with If(~S.confirming):
                             Button(f"Approve & pay {S.total_text}", on_click=SetState("confirming", True))
                             Muted("Nothing is charged until you approve. Claude can't press this button.")
@@ -627,9 +665,9 @@ def _apply_choices(user_id: str, co: dict, address_id: Optional[str] = None, pay
     changes: dict = {}
     if address_id and address_id != (co.get("address") or {}).get("address_id"):
         changes["address_id"] = address_id
-    if pay_with == "wallet":
-        if co.get("pay_with") != "wallet":
-            changes["pay_with"] = "wallet"
+    if pay_with in ("wallet", "provider"):
+        if co.get("pay_with") != pay_with:
+            changes["pay_with"] = pay_with
     elif pay_with:
         if pay_with != (co.get("payment_method") or {}).get("payment_method_id") or co.get("pay_with") != "card":
             changes.update(payment_method_id=pay_with, pay_with="card")
@@ -659,7 +697,8 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
         delivery: optional "standard" or "express".
         use_points: true to spend the shopper's points on this order.
         address_id: optional saved address id (from saved_addresses); default: their default address.
-        payment_method_id: optional saved card id, or "wallet"; default: their default card.
+        payment_method_id: optional saved card id, "wallet", or "provider" (a new card on the secure
+            payment page); default: their default card, or "provider" when they have none.
     """
     user = current_customer()
     cart = talkshop_tools.get_cart(user.user_id)
@@ -670,6 +709,8 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
         co = talkshop_tools.create_checkout(user.user_id, ids)
     except CheckoutError as exc:
         raise ToolError(exc.message)
+    if not payment_method_id and not co.get("saved_payment_methods") and co.get("provider_option"):
+        payment_method_id = "provider"             # a new shopper: pay with a new card on the secure page
     co = _apply_choices(user.user_id, co, address_id, payment_method_id, delivery, True if use_points else None)
     view, state = _checkout_view(co)
     data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "offer_discount", "points_discount",
@@ -693,7 +734,7 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
 def update_checkout_choices(checkout_id: str, address_id: Optional[str] = None, pay_with: Optional[str] = None,
                             delivery: Optional[str] = None, use_points: Optional[str] = None) -> dict:
     """Change an open ShopSphere checkout: shipping address (address_id), payment (a saved card's
-    payment_method_id, or "wallet"), delivery ("standard"/"express") and points ("yes"/"no").
+    payment_method_id, "wallet", or "provider" = a new card on the secure payment page), delivery ("standard"/"express") and points ("yes"/"no").
     Totals and Chase offers are recalculated (Chase offers need a Chase card). Nothing is charged."""
     user = current_customer()
     try:
@@ -729,13 +770,63 @@ async def approve_and_pay(checkout_id: str, checkout_version: int, final_amount:
                 instruction_id = instr.instruction_id
                 vic_instructions.authenticate(db, uid, instruction_id, pk["challenge_id"], pk["nonce"], True)
             elif route != "wallet":
-                raise ToolError("Add a saved card on your ShopSphere account to pay here."
+                raise ToolError("Choose \"a new card\" on the checkout card to pay on the secure payment page."
                                 if route in ("none", "provider_handoff") else
                                 "Set up Visa agent payments on ShopSphere first, then try again.")
         res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button",
                                             instruction_id=instruction_id, approval_id=approval_id, **scope)
     except (CheckoutError, VicError) as exc:
         raise ToolError(exc.message)
+    if res.get("status") != "authorized":
+        raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
+    order = res.get("order") or {}
+    return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
+            "arrives": order.get("delivery_date"), "email": res.get("confirmation_email")}
+
+
+@cards.tool()
+async def start_new_card_payment(checkout_id: str, checkout_version: int, final_amount: float,
+                                 currency: str = "USD") -> dict:
+    """App-only: the shopper tapped Approve & pay for a new card. Records their scoped consent for
+    this exact order and opens a session on the (simulated) secure payment provider's page, where
+    the card is typed. Returns that page's address. The model can't call this."""
+    user = current_customer()
+    with Session(get_engine()) as db:
+        co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+        if co.pay_with != "provider":
+            raise ToolError("Choose \"a new card\" on the checkout card first.")
+    try:
+        res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button", action="PAY",
+                                            checkout_version=int(checkout_version), final_amount=float(final_amount),
+                                            currency=currency)
+    except CheckoutError as exc:
+        if exc.code == "PAYMENT_IN_PROGRESS" and exc.detail.get("hosted_url"):
+            return {"status": "provider_handoff", **exc.detail}       # the page is already open: reuse it
+        raise ToolError(exc.message)
+    if res.get("status") != "provider_handoff":
+        raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
+    return {"status": "provider_handoff", "hosted_url": res["hosted_url"],
+            "payment_session_id": res["payment_session_id"], "expires_at": res.get("expires_at")}
+
+
+@cards.tool(model=True)
+async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional[str] = None) -> dict:
+    """After the shopper finished on the secure payment page: ShopSphere asks the payment provider
+    itself for the result and, if the card was verified, places the order (once). Call it when the
+    shopper says they finished paying there. Nothing is charged unless they completed that page."""
+    user = current_customer()
+    if not payment_session_id:
+        with Session(get_engine()) as db:
+            payment_session_id = checkout_service.get_checkout(db, user.user_id, checkout_id).provider_session_id
+        if not payment_session_id:
+            raise ToolError("There's no open secure payment for this order. Tap Approve & pay on the checkout card.")
+    try:
+        res = await payment_service.complete_provider(user, checkout_id, payment_session_id[:80])
+    except CheckoutError as exc:
+        raise ToolError(exc.message)
+    if res.get("status") == "pending":
+        raise ToolError("The secure payment page isn't finished yet. Enter the card there, then tap "
+                        "\"I've finished paying\" again.")
     if res.get("status") != "authorized":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
     order = res.get("order") or {}

@@ -6,7 +6,8 @@ ShopSphere's OAuth 2.1 authorization server for the MCP connector (Claude / Chat
      https URL the app hosts, e.g. Claude's published identity) or by registering
      (POST /oauth/register, DCR). Both are stateless: a DCR client_id is signed, and CIMD
      documents are fetched (from an allow-listed host) and cached.
-  3. The customer signs in on GET /oauth/authorize with their ShopSphere email and password.
+  3. The customer signs in on GET /oauth/authorize with their ShopSphere email and password,
+     or creates an account there (name, email, password, shipping address; never a card).
   4. A one-time code (PKCE S256) is exchanged at POST /oauth/token for an access token
      bound to this server's /mcp, plus a refresh token (backend/mcp/auth.py).
 """
@@ -23,11 +24,16 @@ from urllib.parse import urlencode, urlparse
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import ValidationError
+from sqlalchemy import func
 
 from backend.auth.security import verify_password
 from backend.db.schema import User
 from backend.db.session_utils import get_session
 from backend.mcp import auth as mcp_auth
+from backend.routers import auth as account
+from backend.routers.auth import RegisterRequest
+from backend.shop import profile
 
 router = APIRouter(tags=["oauth"])
 
@@ -155,31 +161,69 @@ _KEEP = ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge
          "resource", "scope")
 
 
-def _page(params: dict, client: dict, error: str = "", email: str = "") -> HTMLResponse:
+def _field(form: dict, label: str, name: str, kind: str = "text", auto: str = "", extra: str = "",
+           required: bool = True, value: str = "") -> str:
+    val = "" if kind == "password" else html.escape(value or form.get(name, ""), quote=True)
+    req = " required" if required else ""
+    ac = f' autocomplete="{auto}"' if auto else ""
+    return f'<label>{label}</label><input type="{kind}" name="{name}" value="{val}"{req}{ac} {extra}>'
+
+
+def _page(params: dict, client: dict, error: str = "", email: str = "", mode: str = "signin",
+          form: Optional[dict] = None) -> HTMLResponse:
+    """The sign-in page, with a Create account tab for new ShopSphere customers."""
+    form = form or {}
+    signup = mode == "signup"
     hidden = "".join(f'<input type="hidden" name="{k}" value="{html.escape(params.get(k, ""), quote=True)}">'
                      for k in _KEEP)
+    kept = {k: params[k] for k in _KEEP if params.get(k)}
+    other = html.escape("/oauth/authorize?" + urlencode({**kept, "mode": "signin" if signup else "signup"}), quote=True)
     err = f'<p class="err">{html.escape(error)}</p>' if error else ""
     app = html.escape(client["name"])
-    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to ShopSphere</title>
-<style>
- body{{font-family:system-ui,-apple-system,sans-serif;background:#f6f7f9;color:#14171c;margin:0}}
- .box{{max-width:380px;margin:56px auto;background:#fff;border:1px solid #e3e6ea;border-radius:16px;padding:28px}}
- h1{{font-size:22px;margin:0 0 6px}} p{{color:#555;line-height:1.45}} .err{{color:#b00020}}
- label{{display:block;font-size:14px;margin:14px 0 6px}}
- input[type=email],input[type=password]{{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccd;border-radius:10px;font-size:15px}}
- button{{margin-top:18px;width:100%;padding:11px;border:0;border-radius:999px;background:#0b2a4a;color:#fff;font-size:15px;cursor:pointer}}
- .hint{{font-size:13px;color:#777;margin-top:16px}}
-</style></head><body><div class="box">
-<h1>Sign in to ShopSphere</h1>
+    f = lambda *a, **k: _field(form, *a, **k)
+    if signup:
+        body = f"""<h1>Create your ShopSphere account</h1>
+<p>Free to join. <b>{app}</b> can then shop for you at ShopSphere, but it can never pay by itself.
+Every payment needs your approval. Card details go only on the secure payment page, never in the chat.</p>{err}
+<form method="post" action="/oauth/authorize">{hidden}<input type="hidden" name="mode" value="signup">
+{f("Full name", "name", auto="name", extra='maxlength="80"')}
+{f("Email", "email", "email", "email", value=email)}
+{f("Password (8 or more characters)", "password", "password", "new-password", 'minlength="8"')}
+<h2>Shipping address</h2>
+{f("Street address", "line1", auto="address-line1", extra='maxlength="120"')}
+{f("Apt, suite (optional)", "line2", auto="address-line2", extra='maxlength="120"', required=False)}
+<div class="three"><div>{f("City", "city", auto="address-level2", extra='maxlength="80"')}</div>
+<div>{f("State", "state", auto="address-level1", extra='maxlength="2" placeholder="TX"')}</div>
+<div>{f("ZIP", "postal_code", auto="postal-code", extra='maxlength="10" placeholder="78704"')}</div></div>
+<button type="submit">Create account and allow</button></form>
+<p class="switch">Already have an account? <a href="{other}">Sign in</a></p>"""
+    else:
+        body = f"""<h1>Sign in to ShopSphere</h1>
 <p><b>{app}</b> wants to shop for you at ShopSphere: see your cart, prepare checkouts and show your orders.
 It can never pay by itself. Every payment needs your approval.</p>{err}
-<form method="post" action="/oauth/authorize">{hidden}
-<label>Email</label><input type="email" name="email" required autocomplete="username" value="{html.escape(email, quote=True)}">
-<label>Password</label><input type="password" name="password" required autocomplete="current-password">
+<form method="post" action="/oauth/authorize">{hidden}<input type="hidden" name="mode" value="signin">
+{f("Email", "email", "email", "username", value=email)}
+{f("Password", "password", "password", "current-password")}
 <button type="submit">Sign in and allow</button></form>
-<p class="hint">Demo accounts use the password <b>demo1234</b>, e.g. kaajal@shopsphere.demo.</p>
-</div></body></html>""", headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY"})
+<p class="switch">New to ShopSphere? <a href="{other}">Create an account</a></p>
+<p class="hint">Demo accounts use the password <b>demo1234</b>, e.g. kaajal@shopsphere.demo.</p>"""
+    title = "Create your ShopSphere account" if signup else "Sign in to ShopSphere"
+    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<style>
+ body{{font-family:system-ui,-apple-system,sans-serif;background:#f6f7f9;color:#14171c;margin:0}}
+ .box{{max-width:400px;margin:40px auto;background:#fff;border:1px solid #e3e6ea;border-radius:16px;padding:28px}}
+ h1{{font-size:22px;margin:0 0 6px}} h2{{font-size:16px;margin:22px 0 0}} p{{color:#555;line-height:1.45}}
+ .err{{color:#b00020}}
+ label{{display:block;font-size:14px;margin:14px 0 6px}}
+ input[type=email],input[type=password],input[type=text]{{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccd;border-radius:10px;font-size:15px}}
+ .three{{display:grid;grid-template-columns:2fr 1fr 1.3fr;gap:8px}}
+ button{{margin-top:18px;width:100%;padding:11px;border:0;border-radius:999px;background:#0b2a4a;color:#fff;font-size:15px;cursor:pointer}}
+ .switch{{text-align:center;font-size:14px;margin-top:16px}} .switch a{{color:#0b2a4a;font-weight:600}}
+ .hint{{font-size:13px;color:#777;margin-top:10px}}
+ @media (max-width:440px){{.box{{margin:0;border-radius:0;border:0;padding:20px 16px}} .three{{grid-template-columns:1fr 1fr}}}}
+</style></head><body><div class="box">{body}</div></body></html>""",
+                        headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY"})
 
 
 @router.get("/oauth/authorize")
@@ -188,7 +232,40 @@ def authorize_page(request: Request):
     client, problem = _check(params)
     if problem:
         return HTMLResponse(f"<p>{html.escape(problem)}</p>", status_code=400)
-    return _page(params, client)
+    return _page(params, client, mode=params.get("mode", "signin"))
+
+
+_ADDRESS_FIELDS = ("line1", "line2", "city", "state", "postal_code")
+
+
+def _sign_up(params: dict) -> tuple[Optional[str], str]:
+    """Create a ShopSphere customer with their shipping address: (user_id, "") or (None, problem).
+    The same account the website's sign-up makes; no card details are ever asked for here."""
+    name = " ".join(params.get("name", "").split())[:80]
+    password = params.get("password", "")
+    try:
+        email = str(RegisterRequest(name=name or "-", email=params.get("email", "").strip(),
+                                    password=password).email).lower()
+    except ValidationError as exc:
+        bad = {str(e["loc"][0]) for e in exc.errors()}
+        return None, ("Use a password of 8 or more characters." if "password" in bad else "Enter a valid email address.")
+    if not name:
+        return None, "Please enter your name."
+    if account.probe_blocked(email):
+        return None, "Too many attempts for this email. Please wait 15 minutes, or sign in instead."
+    with get_session() as db:
+        if db.query(User).filter(func.lower(User.email) == email).first():
+            account.note_signup_probe(email)
+            return None, "An account with this email already exists. Sign in instead."
+        user_id = account.add_customer(db, name, email, password, source="chat_app")
+        db.flush()
+        try:                                       # commits the account and its address together
+            profile.add_address(db, user_id, full_name=name, label="Home", make_default=True,
+                                **{k: params.get(k, "") for k in _ADDRESS_FIELDS})
+        except profile.ProfileError as exc:
+            db.rollback()
+            return None, exc.message
+    return user_id, ""
 
 
 @router.post("/oauth/authorize")
@@ -198,13 +275,19 @@ async def authorize_submit(request: Request):
     if problem:
         return HTMLResponse(f"<p>{html.escape(problem)}</p>", status_code=400)
     email = params.get("email", "").strip().lower()
-    with get_session() as db:
-        u = db.query(User).filter(User.email == email).first()
-        ok = bool(u and not u.is_guest and u.status == "active" and verify_password(params.get("password", ""),
-                                                                                    u.password_hash))
-        user_id = u.user_id if ok else None
-    if not user_id:
-        return _page(params, client, "Incorrect email or password.", email)
+    if params.get("mode") == "signup":
+        user_id, problem = _sign_up(params)
+        if not user_id:
+            return _page(params, client, problem, email, mode="signup",
+                         form={k: params.get(k, "") for k in ("name", *_ADDRESS_FIELDS)})
+    else:
+        with get_session() as db:
+            u = db.query(User).filter(func.lower(User.email) == email).first()
+            ok = bool(u and not u.is_guest and u.status == "active" and verify_password(params.get("password", ""),
+                                                                                        u.password_hash))
+            user_id = u.user_id if ok else None
+        if not user_id:
+            return _page(params, client, "Incorrect email or password.", email)
     base = _base(request)
     code = mcp_auth.issue_code(sub=user_id, cid=params["client_id"], ru=params["redirect_uri"],
                                cc=params["code_challenge"],
