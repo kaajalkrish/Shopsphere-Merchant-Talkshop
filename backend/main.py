@@ -12,6 +12,7 @@ from backend.config.llm import resolve_llm
 from backend.observability.tracing import init_tracing
 
 from backend.db.config import DB_PATH
+from backend.mcp.shopsphere_app import mcp_http_app
 
 
 @asynccontextmanager
@@ -22,7 +23,8 @@ async def lifespan(app: FastAPI):
     print(f"[LLM] Using {llm_info['provider']} / {llm_info['model']}")
     tracing_enabled, endpoint = init_tracing()
     print(f"[Observability] Tracing {'enabled -> ' + endpoint if tracing_enabled else 'disabled'}")
-    yield
+    async with mcp_http_app.lifespan(app):        # the public MCP server at /mcp (ChatGPT / Claude)
+        yield
 
 
 app = FastAPI(
@@ -106,3 +108,8 @@ async def transcribe(audio: UploadFile = File(...)):
 
     tmp_path.unlink(missing_ok=True)
     return {"text": transcript}
+
+
+# ShopSphere for ChatGPT / Claude: MCP (Streamable HTTP) at /mcp, read-only product search.
+# Mounted last so it never shadows the routes above.
+app.mount("/", mcp_http_app)
