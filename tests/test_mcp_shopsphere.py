@@ -119,3 +119,20 @@ def test_mcp_endpoint_is_served_over_http_next_to_the_api():
                                     "clientInfo": {"name": "pytest", "version": "1"}}})
         assert r.status_code == 200, r.text
         assert "ShopSphere" in r.text
+
+
+def test_show_cards_by_id_keeps_the_card_address_chat_apps_saved():
+    """Claude caches a connector's tool list. show_shopsphere_cards existed in an earlier
+    version, so it stays, under the same name and card address, and draws the current cards."""
+    async def go():
+        async with Client(mcp) as c:
+            listed = {t.name: t for t in await c.list_tools()}
+            assert listed["show_shopsphere_cards"].meta["ui"]["resourceUri"] == \
+                "ui://prefab/tool/56184b77970e/renderer.html"
+            return await c.call_tool("show_shopsphere_cards", {"product_ids": ["SSP001", "SSP003", "NOPE"],
+                                                               "size": "10"})
+    r = run(go())
+    data = json.loads(r.content[0].text)
+    assert [p["product_id"] for p in data["products"]] == ["SSP001", "SSP003"]
+    page = json.dumps(r.structured_content)
+    assert page.count("data:image/jpeg") == 2 and "Add to cart" in page

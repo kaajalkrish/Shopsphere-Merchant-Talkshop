@@ -345,6 +345,25 @@ def search_shopsphere(query: str, category: Optional[str] = None, size: Optional
     return _ui(view, state, result)
 
 
+@cards.ui(annotations=READ_ONLY)
+def show_shopsphere_cards(product_ids: list[str], size: Optional[str] = None,
+                          color: Optional[str] = None) -> ToolResult:
+    """Show specific ShopSphere products as cards (photo, price, size/colour pickers, Add to
+    cart), e.g. products from an earlier search_shopsphere, to show again or compare. Pass their
+    product_ids (up to 5) and the size/colour the shopper wants."""
+    # Kept under this name: chat apps that saved an earlier tool list call it, and its card
+    # address (ui://prefab/tool/<hash of the name>/renderer.html) must stay the same.
+    picks = []
+    for pid in list(dict.fromkeys(product_ids or []))[:5]:
+        p = talkshop_tools.get_product(pid)
+        if p:
+            picks.append(_card(p, talkshop_tools.check_variant(pid, size=size), size, color))
+    result = {"store": "ShopSphere", "found": bool(picks), "query": ", ".join(product_ids or []), "size": size,
+              "products": picks, "notes": [], "next_step": "Recommend these ShopSphere products only."}
+    view, state = _cards_view(result)
+    return _ui(view, state, result)
+
+
 # ── Account, cart, checkout and payment (signed-in customer) ──────────────────
 
 @mcp.tool(annotations=READ_ONLY)
