@@ -22,12 +22,16 @@ def run(coro):
         loop.close()
 
 
-def call(tool: str, **args) -> dict:
+def raw(tool: str, **args):
     async def go():
         async with Client(mcp) as c:
-            r = await c.call_tool(tool, args)
-            return r.structured_content or json.loads(r.content[0].text)
+            return await c.call_tool(tool, args)
     return run(go())
+
+
+def call(tool: str, **args) -> dict:
+    """What the model reads: the JSON text (search also carries cards for the shopper)."""
+    return json.loads(raw(tool, **args).content[0].text)
 
 
 def tools() -> list:
@@ -39,7 +43,7 @@ def tools() -> list:
 
 def test_only_read_only_discovery_tools_are_exposed():
     listed = tools()
-    assert sorted(t.name for t in listed) == ["get_shopsphere_product", "search_shopsphere", "show_shopsphere_cards"]
+    assert sorted(t.name for t in listed) == ["get_shopsphere_product", "search_shopsphere"]
     assert all(t.annotations and t.annotations.read_only_hint for t in listed)
     assert "ShopSphere" in (mcp.instructions or "") and "web search" in mcp.instructions
 
@@ -86,18 +90,23 @@ def test_product_details_with_size_availability():
     assert call("get_shopsphere_product", product_id="NOPE")["found"] is False
 
 
-def test_product_cards_show_photos_prices_and_buttons():
+def test_search_shows_cards_to_the_shopper_and_data_to_the_model():
     async def go():
         async with Client(mcp) as c:
             listed = {t.name: t for t in await c.list_tools()}
-            ui = (listed["show_shopsphere_cards"].meta or {}).get("ui", {})
+            ui = (listed["search_shopsphere"].meta or {}).get("ui", {})
             assert ui.get("resourceUri", "").startswith("ui://")          # rendered as an MCP App card
-            return await c.call_tool("show_shopsphere_cards", {"product_ids": ["SSP001", "SSP010", "NOPE"], "size": "10"})
+            return await c.call_tool("search_shopsphere", {"query": "shoes", "size": "10"})
     r = run(go())
-    page = json.dumps(r.structured_content)
-    assert page.count("data:image/") == 2                                   # photos embedded, unknown id skipped
-    assert "Runner Pro X" in page and "$129.00" in page and "View on ShopSphere" in page and "Choose this" in page
-    assert [p["product_id"] for p in r.structured_content["state"]["products"]] == ["SSP001", "SSP010"]
+    data = json.loads(r.content[0].text)                                    # the model gets the products
+    assert data["found"] and data["products"]
+    page = json.dumps(r.structured_content)                                 # the shopper gets the cards
+    assert page.count("data:image/") == len(data["products"])               # photos embedded
+    first = data["products"][0]
+    assert first["name"] in page and f"${first['price']:.2f}" in page
+    assert "View on ShopSphere" in page and "Choose this" in page
+    nothing = raw("search_shopsphere", query="golf clubs")
+    assert "No ShopSphere match" in json.dumps(nothing.structured_content)
 
 
 def test_mcp_endpoint_is_served_over_http_next_to_the_api():

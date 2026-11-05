@@ -10,12 +10,15 @@ user-scoped tools (create_checkout with a default user) that must never be publi
 Nothing here reads or changes a cart, an order or a customer.
 """
 import base64
+import json
 import os
 import re
 from typing import Optional
 
 from fastmcp import FastMCP
 from fastmcp.apps.app import FastMCPApp
+from fastmcp.tools.base import ToolResult, _prefab_to_tool_result   # fastmcp==4.0.10 (pinned)
+from mcp.types import TextContent
 from prefab_ui.actions import OpenLink, SendMessage
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (Badge, Button, Card, CardContent, CardFooter, Column, Grid, H3, Image, Muted,
@@ -32,11 +35,10 @@ You are shopping on behalf of the user at ShopSphere, an online store.
 ShopSphere first, always:
 1. For any shopping request (products, sizes, colours, prices, recommendations), call
    search_shopsphere BEFORE anything else, including web search.
-2. If it returns products, FIRST call show_shopsphere_cards with those product_ids (and the
-   same size and colour) so the shopper sees product cards with photos. THEN, below the
-   cards, recommend ONLY those ShopSphere products: name, brand, price, the colours
-   available in the requested size, one line on why each fits, and the product link.
-   Do not add products from other stores.
+2. search_shopsphere shows the shopper product cards (photo, price, colours, buttons) by
+   itself. Below them, recommend ONLY those ShopSphere products: name, brand, price, the
+   colours available in the requested size, one line on why each fits, and the product
+   link. Do not add products from other stores.
 3. Only if search_shopsphere returns found=false (or the user asks to look elsewhere) may
    you use web search. Then say clearly that ShopSphere doesn't have a match and that the
    web results are from other stores, not ShopSphere.
@@ -104,27 +106,10 @@ def _card(p: dict, avail: dict, size: Optional[str], color: Optional[str]) -> di
     }
 
 
-@mcp.tool(annotations=READ_ONLY)
-def search_shopsphere(query: str, category: Optional[str] = None, size: Optional[str] = None,
-                      color: Optional[str] = None, max_price: Optional[float] = None,
-                      gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3) -> dict:
-    """Search the ShopSphere store catalog. Call this FIRST for every shopping request, before web search.
-
-    Args:
-        query: what the shopper wants, in their words, e.g. "running shoes", "wireless earbuds".
-        category: optional: shoes, clothing, electronics, accessories, earbuds, headphones,
-            speakers, smartwatches or fitness_trackers.
-        size: optional size the shopper needs, e.g. "10" for shoes or "M" for clothing.
-            Only products with that size in stock are returned.
-        color: optional colour, e.g. "black".
-        max_price: optional budget in USD.
-        gender: optional: men, women or unisex.
-        brand: optional brand name.
-        limit: how many recommendations (1-5, default 3).
-
-    Returns found=true with ShopSphere products in stock, or found=false: only then may you
-    search the web, and you must say those results are not from ShopSphere.
-    """
+def find_products(query: str, category: Optional[str] = None, size: Optional[str] = None,
+                  color: Optional[str] = None, max_price: Optional[float] = None,
+                  gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3) -> dict:
+    """The search behind search_shopsphere: {found, products, notes, next_step, ...}."""
     limit = max(1, min(int(limit or 3), 5))
     blocked = parse.not_sold(query)
     if blocked:                                            # groceries, furniture, appliances…: never sold here
@@ -211,22 +196,15 @@ def _photo(image_url: Optional[str]) -> Optional[str]:
     return f"data:{mime};base64," + base64.b64encode(f.read_bytes()).decode("ascii")
 
 
-@cards.ui(annotations=READ_ONLY)
-async def show_shopsphere_cards(product_ids: list[str], size: Optional[str] = None,
-                                color: Optional[str] = None) -> PrefabApp:
-    """Show ShopSphere products as cards with photos, price, rating and the colours in stock,
-    plus View on ShopSphere and Choose buttons. Call this right after search_shopsphere
-    returns products, with their product_ids (up to 5) and the same size and colour; then
-    write your recommendation text below the cards."""
-    items = []
-    for pid in list(dict.fromkeys(product_ids))[:5]:
-        p = talkshop_tools.get_product(pid)
-        if p:
-            items.append(_card(p, talkshop_tools.check_variant(pid, size=size), size, color))
+def _cards_view(result: dict) -> Column:
+    """The product cards for one search (or a one-line note when ShopSphere has no match)."""
+    items, size = result["products"], result.get("size")
     with Column(gap=3) as view:
         H3("ShopSphere picks" + (f" in size {size}" if size else ""))
+        for note in result.get("notes", []):
+            Muted(note)
         if not items:
-            Muted("These products aren't in the ShopSphere catalog.")
+            Muted(f"No ShopSphere match for “{result['query']}”.")
         with Grid(columns={"default": 1, "sm": 2, "md": 3}, gap=3):
             for it in items:
                 with Card():
@@ -249,8 +227,38 @@ async def show_shopsphere_cards(product_ids: list[str], size: Optional[str] = No
                         Button("View on ShopSphere", variant="outline", size="sm", on_click=OpenLink(it["url"]))
                         Button("Choose this", size="sm", on_click=SendMessage(
                             f"I'd like the {it['name']}" + (f" in size {size}" if size else "") + "."))
-    return PrefabApp(view=view, state={"products": [{k: it[k] for k in ("product_id", "name", "price", "url")}
-                                                    for it in items]})
+    return view
+
+
+@cards.ui(annotations=READ_ONLY)
+def search_shopsphere(query: str, category: Optional[str] = None, size: Optional[str] = None,
+                      color: Optional[str] = None, max_price: Optional[float] = None,
+                      gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3) -> ToolResult:
+    """Search the ShopSphere store catalog. Call this FIRST for every shopping request, before
+    web search. Shows the shopper product cards (photos, prices, colours, buttons) and returns
+    the same products to you as JSON, to recommend below the cards.
+
+    Args:
+        query: what the shopper wants, in their words, e.g. "running shoes", "wireless earbuds".
+        category: optional: shoes, clothing, electronics, accessories, earbuds, headphones,
+            speakers, smartwatches or fitness_trackers.
+        size: optional size the shopper needs, e.g. "10" for shoes or "M" for clothing.
+            Only products with that size in stock are returned.
+        color: optional colour, e.g. "black".
+        max_price: optional budget in USD.
+        gender: optional: men, women or unisex.
+        brand: optional brand name.
+        limit: how many recommendations (1-5, default 3).
+
+    Returns found=true with ShopSphere products in stock, or found=false: only then may you
+    search the web, and you must say those results are not from ShopSphere.
+    """
+    result = find_products(query, category=category, size=size, color=color, max_price=max_price,
+                           gender=gender, brand=brand, limit=limit)
+    shown = _prefab_to_tool_result(PrefabApp(view=_cards_view(result)), fastmcp_app_name="ShopSphere")
+    # The cards are for the shopper; the model reads the products as JSON (not "[Rendered Prefab UI]").
+    return ToolResult(content=[TextContent(type="text", text=json.dumps(result))],
+                      structured_content=shown.structured_content)
 
 
 mcp.add_provider(cards)
