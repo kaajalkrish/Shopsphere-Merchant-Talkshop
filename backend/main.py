@@ -13,6 +13,8 @@ from backend.observability.tracing import init_tracing
 
 from backend.db.config import DB_PATH
 from backend.mcp.shopsphere_app import mcp_http_app
+from backend.mcp.auth import McpSignIn
+from backend.oauth.server import router as oauth_router
 
 
 @asynccontextmanager
@@ -68,6 +70,7 @@ app.include_router(shop.router)
 app.include_router(talkshop.router)
 app.include_router(member.router)
 app.include_router(vic.router)
+app.include_router(oauth_router)       # ShopSphere sign-in for the MCP connector (OAuth 2.1)
 
 # CH-6: in a one-process demo the mock gateway / Simulated Secure Payment Provider is
 # also reachable at /psp, so the customer's browser can open the provider's hosted page
@@ -110,6 +113,7 @@ async def transcribe(audio: UploadFile = File(...)):
     return {"text": transcript}
 
 
-# ShopSphere for ChatGPT / Claude: MCP (Streamable HTTP) at /mcp, read-only product search.
+# ShopSphere for ChatGPT / Claude: MCP (Streamable HTTP) at /mcp: search, cart, checkout, payment.
 # Mounted last so it never shadows the routes above.
-app.mount("/", mcp_http_app)
+# McpSignIn: cart, checkout, payment and order tools need the customer's ShopSphere sign-in.
+app.mount("/", McpSignIn(mcp_http_app))

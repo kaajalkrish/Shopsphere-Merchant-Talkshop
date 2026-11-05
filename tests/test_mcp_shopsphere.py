@@ -41,10 +41,10 @@ def tools() -> list:
     return run(go())
 
 
-def test_only_read_only_discovery_tools_are_exposed():
-    listed = tools()
-    assert sorted(t.name for t in listed) == ["get_shopsphere_product", "search_shopsphere"]
-    assert all(t.annotations and t.annotations.read_only_hint for t in listed)
+def test_discovery_tools_are_read_only():
+    listed = {t.name: t for t in tools()}
+    for name in ("search_shopsphere", "get_shopsphere_product"):            # open to everyone, change nothing
+        assert listed[name].annotations and listed[name].annotations.read_only_hint
     assert "ShopSphere" in (mcp.instructions or "") and "web search" in mcp.instructions
 
 
@@ -104,7 +104,7 @@ def test_search_shows_cards_to_the_shopper_and_data_to_the_model():
     assert page.count("data:image/") == len(data["products"])               # photos embedded
     first = data["products"][0]
     assert first["name"] in page and f"${first['price']:.2f}" in page
-    assert "View on ShopSphere" in page and "Choose this" in page
+    assert "Add to cart" in page and "Details" in page and '"add_to_cart"' in page
     nothing = raw("search_shopsphere", query="golf clubs")
     assert "No ShopSphere match" in json.dumps(nothing.structured_content)
 
