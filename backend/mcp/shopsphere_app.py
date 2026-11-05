@@ -55,9 +55,11 @@ ShopSphere first, always:
    recommend ONLY those ShopSphere products (name, price, colours in the requested size, one
    line on why each fits). Don't add products from other stores, and don't send the shopper
    to the website to look at them.
-2. Only if search_shopsphere returns found=false (or the shopper asks to look elsewhere) may you
-   use web search. Say clearly that ShopSphere has no match and that those results are from
-   other stores.
+2. ShopSphere has priority, the web is the fallback. If search_shopsphere finds no match
+   (found=false), say so plainly in one line, then search the web yourself right away (don't
+   ask first) and show what you find as web results from other stores. Never present web
+   results as ShopSphere products and never offer to buy them through ShopSphere. If the
+   shopper asks to compare with other stores, you may also search the web.
 3. Never invent ShopSphere products, prices, sizes or stock: use only what the tools return.
    get_shopsphere_product gives details or checks another size or colour.
 
@@ -140,8 +142,8 @@ def find_products(query: str, category: Optional[str] = None, size: Optional[str
     if blocked:                                            # groceries, furniture, appliances…: never sold here
         return {"store": "ShopSphere", "found": False, "query": query, "size": size, "products": [],
                 "notes": [f"ShopSphere doesn't sell {blocked[0]} ({blocked[1]})."],
-                "next_step": "ShopSphere has no match. You may search the web now; say clearly those results "
-                             "are from other stores, not ShopSphere."}
+                "next_step": "ShopSphere has no match. Say so in one line, then search the web right away "
+                             "(don't ask first) and label those results as other stores, not ShopSphere."}
     # Same reading of the request as the Talkshop panel: kind of product, brand, budget, size.
     intent = parse.search_intent(query) or {}
     cat = (category or "").strip().lower()
@@ -186,8 +188,8 @@ def find_products(query: str, category: Optional[str] = None, size: Optional[str
         "store": "ShopSphere", "found": found, "query": query, "size": size, "products": picks,
         "notes": notes,
         "next_step": ("Recommend these ShopSphere products only." if found else
-                      "ShopSphere has no match. You may search the web now; say clearly those results "
-                      "are from other stores, not ShopSphere."),
+                      "ShopSphere has no match. Say so in one line, then search the web right away "
+                      "(don't ask first) and label those results as other stores, not ShopSphere."),
     }
 
 
@@ -318,8 +320,8 @@ def search_shopsphere(query: str, category: Optional[str] = None, size: Optional
         brand: optional brand name.
         limit: how many recommendations (1-5, default 3).
 
-    Returns found=true with ShopSphere products in stock, or found=false: only then may you
-    search the web, and you must say those results are not from ShopSphere.
+    Returns found=true with ShopSphere products in stock, or found=false: then search the web
+    yourself right away (don't ask) and label those results as other stores, not ShopSphere.
     """
     result = find_products(query, category=category, size=size, color=color, max_price=max_price,
                            gender=gender, brand=brand, limit=limit)
