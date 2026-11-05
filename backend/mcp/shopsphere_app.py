@@ -13,6 +13,8 @@ import base64
 import json
 import os
 import re
+from functools import lru_cache
+from io import BytesIO
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -212,18 +214,32 @@ cards = FastMCPApp("ShopSphere")
 WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 
 
-def _photo(image_url: Optional[str]) -> Optional[str]:
-    """The product photo embedded in the card (data URI): cards render in a sandbox
-    that may not load images from other sites. Read from the frontend's public folder."""
+def _photo(image_url: Optional[str], px: int = 240) -> Optional[str]:
+    """A small JPEG thumbnail of the product photo, embedded in the card as a data URI: cards
+    render in a sandbox that may not load images from other sites, and full photos would make
+    a card too big for the chat app (5 photos were ~300 KB; thumbnails are a few KB each)."""
     if image_url and image_url.startswith(_site()):
         image_url = image_url[len(_site()):]
     if not image_url or not image_url.startswith("/catalog/"):
         return None
-    f = (CATALOG_IMAGE_DIR / image_url[len("/catalog/"):]).resolve()
+    return _thumbnail(image_url[len("/catalog/"):], px)
+
+
+@lru_cache(maxsize=512)
+def _thumbnail(rel_path: str, px: int) -> Optional[str]:
+    from PIL import Image as PILImage
+    f = (CATALOG_IMAGE_DIR / rel_path).resolve()
     if CATALOG_IMAGE_DIR.resolve() not in f.parents or not f.is_file():
         return None
-    mime = "image/webp" if f.suffix == ".webp" else "image/jpeg" if f.suffix in (".jpg", ".jpeg") else "image/png"
-    return f"data:{mime};base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+    try:
+        with PILImage.open(f) as photo:
+            photo = photo.convert("RGB")
+            photo.thumbnail((px, px))
+            buf = BytesIO()
+            photo.save(buf, format="JPEG", quality=72, optimize=True)
+    except OSError:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _ui(view, state: dict, data: dict) -> ToolResult:
@@ -405,7 +421,7 @@ def _cart_view(cart: dict) -> tuple[Column, dict]:
             with If(~getattr(STATE, gone)):
                 with Card():
                     with CardContent(), Row(gap=3, align="center"):
-                        photo = _photo(ln.get("image_url"))
+                        photo = _photo(ln.get("image_url"), 96)
                         if photo:
                             Image(src=photo, alt=ln["name"], css_class="w-16 h-16 object-contain bg-white")
                         with Column(gap=1, css_class="flex-1"):
