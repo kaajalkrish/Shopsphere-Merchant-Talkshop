@@ -66,6 +66,14 @@ Environment variables (names only; values live in the dashboards, never in git):
 and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are optional or unused, and the demo
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
+**Shop from Claude (MCP connector, step 1: search).** The backend also serves an MCP server at
+`https://shopsphere-api-ctnr.onrender.com/mcp` ([`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)):
+read-only tools `search_shopsphere` and `get_shopsphere_product`, using the same catalog logic as the Talkshop
+panel (sizes, colours, stock, brands not carried, things ShopSphere doesn't sell). Its instructions tell the chat
+app to search ShopSphere first and use web search only when ShopSphere has no match. No sign-in, no cart or
+customer data. In claude.ai: Settings → Connectors → Add custom connector → that URL. Buying from the chat
+(sign-in, cart, approval on the website) is a later step.
+
 **Deploying a change:** edit locally → `python -m pytest tests/` and `cd frontend; npm run build` → commit → push to
 `main` (`git push shopsphere HEAD:main`) → Vercel and Render redeploy automatically.
 
