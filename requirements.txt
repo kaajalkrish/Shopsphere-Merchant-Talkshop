@@ -17,7 +17,7 @@ langchain-community>=0.3.0
 langgraph>=0.2.0
 
 # ── MCP (Phase 2+) ────────────────────────────────────────────────────────────
-fastmcp>=2.0.0
+fastmcp[apps]>=4.0.10
 
 # ── Guardrails (Phase 2+) ─────────────────────────────────────────────────────
 nemoguardrails>=0.9.0
