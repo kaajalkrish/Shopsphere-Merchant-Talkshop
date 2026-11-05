@@ -196,3 +196,57 @@ def test_the_fresh_shop_address_is_the_same_connector(client):
     stray = mcp_auth.issue_tokens("USR001", "x", "https://elsewhere.example/shop")["access_token"]
     r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, stray, path="/shop")
     assert r.status_code == 401
+
+
+def _fresh_cart(client, token):
+    for ln in call(client, "show_cart", token)["items"]:
+        rpc(client, "tools/call", {"name": "update_cart_line", "arguments": {"line_id": ln["line_id"], "quantity": 0}},
+            token)
+
+
+def _pay(client, token, checkout_id, state):
+    r, msg = rpc(client, "tools/call", {"name": "approve_and_pay", "arguments": {
+        "checkout_id": checkout_id, "checkout_version": state["version"], "final_amount": state["total"],
+        "currency": state["currency"]}}, token)
+    text = msg["result"]["content"][0]["text"]
+    assert not msg["result"].get("isError"), text
+    return json.loads(text)
+
+
+def test_change_address_card_and_delivery_on_the_checkout_card_then_pay(client):
+    token = sign_in(client, "kaajal@shopsphere.demo")
+    _fresh_cart(client, token)
+    call(client, "add_to_cart", token, product_id="SSP003", size="9", color="Blue")
+    co = call(client, "checkout", token)
+    work = next(a for a in co["saved_addresses"] if a["label"] == "Work")
+    mc = next(c for c in co["saved_payment_methods"] if "Mastercard" in c["display"])
+    r, msg = rpc(client, "tools/call", {"name": "checkout", "arguments": {}}, token)
+    page = json.dumps(msg["result"]["structuredContent"])
+    assert "Change your order" in page and "Ship to Work" in page and "Update order" in page   # the choices are on the card
+    st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"], address_id=work["address_id"],
+              pay_with=mc["payment_method_id"], delivery="express")
+    assert "Work" in st["ship_to"] or "Lavaca" in st["ship_to"]
+    assert "Mastercard" in st["pay_with_text"] and "Express" in st["delivery_label"]
+    assert st["version"] > co["checkout_version"] and st["payable"]
+    # Kaajal's Chase Mastercard is the demo's declined card: no order, and the order stays open
+    r, msg = rpc(client, "tools/call", {"name": "approve_and_pay", "arguments": {
+        "checkout_id": co["checkout_id"], "checkout_version": st["version"], "final_amount": st["total"],
+        "currency": st["currency"]}}, token)
+    assert msg["result"]["isError"] and "declined" in msg["result"]["content"][0]["text"]
+    assert not any(o.get("order_id") for o in call(client, "my_orders", token)["orders"]
+                   if "Lavaca" in json.dumps(o))
+    visa = next(c for c in co["saved_payment_methods"] if "Visa" in c["display"])
+    st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"], pay_with=visa["payment_method_id"])
+    assert "Visa agent payment" in st["pay_with_text"]
+    paid = _pay(client, token, co["checkout_id"], st)                  # pays exactly the updated order
+    assert paid["status"] == "authorized", paid
+
+
+def test_pay_with_the_shopsphere_wallet_from_the_card(client):
+    token = sign_in(client, "kaajal@shopsphere.demo")
+    _fresh_cart(client, token)
+    call(client, "add_to_cart", token, product_id="SSP049", color="White")
+    co = call(client, "checkout", token)
+    st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"], pay_with="wallet")
+    assert "Wallet" in st["pay_with_text"] and st["payable"]
+    assert _pay(client, token, co["checkout_id"], st)["status"] == "authorized"

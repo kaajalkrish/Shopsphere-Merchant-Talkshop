@@ -482,13 +482,53 @@ def show_cart() -> ToolResult:
     return _ui(view, state, data)
 
 
-def _checkout_view(co: dict) -> tuple[Column, dict]:
+def _checkout_state(co: dict) -> dict:
+    """What the checkout card shows, as values the card can refresh in place after a change."""
     path = co.get("payment_path") or {}
     route = path.get("route")
-    payable = bool(co.get("ready")) and route in ("saved_card", "vic", "wallet")
-    state = {"confirming": False, "paid": False, "order_ref": ""}
     dl = co.get("delivery") or {}
     chosen = next((o for o in dl.get("options", []) if o["method"] == dl.get("method")), {})
+    points = co.get("points") or {}
+    card = (path.get("card") or {}).get("display") or path.get("label") or "no saved card"
+    return {
+        "checkout_id": co["checkout_id"], "version": co["checkout_version"], "total": co["total"],
+        "currency": co.get("currency") or "USD", "total_text": _money(co["total"]),
+        "subtotal_text": _money(co["subtotal"]),
+        "has_offer": bool(co.get("offer_discount")),
+        "offer_label": f"Chase offer: {(co.get('offer') or {}).get('title', 'offer')}",
+        "offer_text": "−" + _money(co.get("offer_discount")),
+        "has_points": bool(co.get("points_discount")),
+        "points_label": f"Points ({points.get('used', 0)})", "points_text": "−" + _money(co.get("points_discount")),
+        "delivery_label": f"Delivery: {chosen.get('label', 'Standard')}, arrives {dl.get('date')}",
+        "shipping_text": _money(co.get("shipping")), "arrives": dl.get("date"),
+        "tax_text": _money(co.get("tax")),
+        "ship_to": f"Ship to: {(co.get('address') or {}).get('display') or 'no address yet'}",
+        "pay_with_text": "Pay with: " + ("ShopSphere Wallet" if route == "wallet" else card)
+                         + (" · Visa agent payment (VIC-inspired, simulated)" if route == "vic" else ""),
+        "earn_text": f"You'll earn {co.get('earn_points') or 0} points with this order.",
+        "payable": bool(co.get("ready")) and route in ("saved_card", "vic", "wallet"),
+        "problem": " ".join(i.get("message") or f"{i.get('name') or 'Item'}: {i.get('code')}"
+                            for i in co.get("issues") or []),
+    }
+
+
+_REFRESHED = ("version", "total", "total_text", "subtotal_text", "has_offer", "offer_label", "offer_text",
+              "has_points", "points_label", "points_text", "delivery_label", "shipping_text", "arrives", "tax_text",
+              "ship_to", "pay_with_text", "earn_text", "payable", "problem")
+
+
+def _checkout_view(co: dict) -> tuple[Column, dict]:
+    """The review card: items, totals and choices (address, card, delivery, points) that update
+    the same card in place; then Approve & pay -> simulated passkey -> order confirmed."""
+    st = _checkout_state(co)
+    pts = co.get("points") or {}
+    dl = co.get("delivery") or {}
+    state = {**st, "confirming": False, "paid": False, "order_ref": "",
+             "address_id": (co.get("address") or {}).get("address_id") or "",
+             "pay_id": "wallet" if co.get("pay_with") == "wallet" else (co.get("payment_method") or {}).get("payment_method_id") or "",
+             "delivery": dl.get("method") or "standard",
+             "use_points": "yes" if co.get("points_discount") else "no"}
+    S = STATE
     with Column(gap=3) as view:
         H3("Review your ShopSphere order")
         with Card():
@@ -498,67 +538,128 @@ def _checkout_view(co: dict) -> tuple[Column, dict]:
                         Text(f"{ln['name']} ({_variant_label(ln.get('size'), ln.get('color'))}) × {ln['quantity']}")
                         Text(_money(ln["unit_price"] * ln["quantity"]))
                 Separator()
-                rows = [("Subtotal", co["subtotal"])]
-                if co.get("offer_discount"):
-                    rows.append((f"Chase offer: {(co.get('offer') or {}).get('title', 'offer')}", -co["offer_discount"]))
-                if co.get("points_discount"):
-                    rows.append((f"Points ({(co.get('points') or {}).get('used', 0)})", -co["points_discount"]))
-                rows += [(f"Delivery: {chosen.get('label', 'Standard')}, arrives {dl.get('date')}", co.get("shipping")),
-                         ("Tax", co.get("tax"))]
-                for label, amount in rows:
+                with Row(gap=2, css_class="justify-between"):
+                    Muted("Subtotal")
+                    Muted(f"{S.subtotal_text}")
+                with If(S.has_offer):
                     with Row(gap=2, css_class="justify-between"):
-                        Muted(label)
-                        Muted(_money(amount) if (amount or 0) >= 0 else "−" + _money(-amount))
+                        Muted(f"{S.offer_label}")
+                        Muted(f"{S.offer_text}")
+                with If(S.has_points):
+                    with Row(gap=2, css_class="justify-between"):
+                        Muted(f"{S.points_label}")
+                        Muted(f"{S.points_text}")
+                with Row(gap=2, css_class="justify-between"):
+                    Muted(f"{S.delivery_label}")
+                    Muted(f"{S.shipping_text}")
+                with Row(gap=2, css_class="justify-between"):
+                    Muted("Tax")
+                    Muted(f"{S.tax_text}")
                 with Row(gap=2, css_class="justify-between"):
                     Text("Total", css_class="font-semibold")
-                    Text(_money(co["total"]), css_class="font-semibold")
-                Muted(f"Ship to: {(co.get('address') or {}).get('display') or 'no address yet'}")
-                card = (path.get("card") or {}).get("display") or path.get("label") or "no saved card"
-                Muted(f"Pay with: {card}" + (" · Visa agent payment (VIC-inspired, simulated)" if route == "vic" else ""))
-                if co.get("earn_points"):
-                    Muted(f"You'll earn {co['earn_points']} points with this order.")
-                for issue in co.get("issues") or []:
-                    Muted("⚠ " + (issue.get("message") or f"{issue.get('name') or 'Item'}: {issue.get('code')}"))
+                    Text(f"{S.total_text}", css_class="font-semibold")
+                Muted(f"{S.ship_to}")
+                Muted(f"{S.pay_with_text}")
+                Muted(f"{S.earn_text}")
+                with If(~S.paid):
+                    Separator()
+                    Text("Change your order", css_class="font-medium")
+                    with Grid(columns={"default": 1, "sm": 2}, gap=2):
+                        with Select(name="address_id", value=state["address_id"], size="sm"):
+                            for a in co.get("saved_addresses") or []:
+                                SelectOption(value=a["address_id"], label=f"Ship to {a.get('label') or 'address'}: {a['display']}")
+                        with Select(name="pay_id", value=state["pay_id"], size="sm"):
+                            for c in co.get("saved_payment_methods") or []:
+                                SelectOption(value=c["payment_method_id"],
+                                             label=f"Pay with {c.get('issuer_display') + ' ' if c.get('issuer_display') else ''}{c['display']}")
+                            if (co.get("wallet") or {}).get("enough"):
+                                SelectOption(value="wallet", label=f"Pay with ShopSphere Wallet ({_money(co['wallet'].get('balance'))})")
+                        with Select(name="delivery", value=state["delivery"], size="sm"):
+                            for o in dl.get("options") or []:
+                                SelectOption(value=o["method"], label=f"{o['label']} delivery, arrives {o['date']}"
+                                             + (f" (+{_money(o['price'])})" if o.get("price") else " (free)"))
+                        if pts.get("max_usable"):
+                            with Select(name="use_points", value=state["use_points"], size="sm"):
+                                SelectOption(value="no", label="Don't use points")
+                                SelectOption(value="yes", label=f"Use {pts['max_usable']} points "
+                                                                f"(−{_money(pts['max_usable'] * pts.get('value_per_point', 0.01))})")
+                    Button("Update order", variant="outline", size="sm", on_click=CallTool(
+                        "update_checkout_choices", arguments={
+                            "checkout_id": co["checkout_id"], "address_id": S.address_id, "pay_with": S.pay_id,
+                            "delivery": S.delivery, "use_points": S.use_points},
+                        onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _REFRESHED),
+                                   ShowToast("Order updated", variant="success")],
+                        onError=_failed_toast("Couldn't update the order")))
+                    Muted("To add a new card or address, use your ShopSphere account. Card numbers never go "
+                          "through the chat.")
             with CardFooter(), Column(gap=2):
-                if not payable:
-                    Muted("This order can't be paid here yet: fix the items above in your cart (or add a saved "
-                          "card and address on your ShopSphere account), then check out again.")
-                else:
-                    with If(~STATE.paid):
-                        with If(~STATE.confirming):
-                            Button(f"Approve & pay {_money(co['total'])}", on_click=SetState("confirming", True))
+                with If(~S.payable):
+                    Muted(f"This order can't be paid here yet. {S.problem} Fix it in your cart or choose another "
+                          "card, then update the order.")
+                with If(S.payable):
+                    with If(~S.paid):
+                        with If(~S.confirming):
+                            Button(f"Approve & pay {S.total_text}", on_click=SetState("confirming", True))
                             Muted("Nothing is charged until you approve. Claude can't press this button.")
-                        with If(STATE.confirming):
+                        with If(S.confirming):
                             Text("Confirm it's you", css_class="font-medium")
                             Muted("Simulated passkey (demo, not a real passkey; your card issuer isn't contacted).")
                             with Row(gap=2):
                                 Button("Confirm with passkey", variant="success", on_click=CallTool(
                                     "approve_and_pay", arguments={
-                                        "checkout_id": co["checkout_id"], "checkout_version": co["checkout_version"],
-                                        "final_amount": co["total"], "currency": co.get("currency") or "USD"},
+                                        "checkout_id": co["checkout_id"], "checkout_version": S.version,
+                                        "final_amount": S.total, "currency": state["currency"]},
                                     onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
                                                ShowToast("Payment approved", variant="success")],
                                     onError=[SetState("confirming", False), _failed_toast("Payment not completed")]))
                                 Button("Cancel", variant="outline", on_click=SetState("confirming", False))
-                    with If(STATE.paid):
-                        Text(f"✓ Order {STATE.order_ref} confirmed", css_class="font-semibold")
-                        Muted(f"Arrives {dl.get('date')}. A confirmation email is on its way.")
+                    with If(S.paid):
+                        Text(f"✓ Order {S.order_ref} confirmed", css_class="font-semibold")
+                        Muted(f"Arrives {S.arrives}. A confirmation email is on its way.")
                         Button("Track my order", variant="outline", size="sm",
                                on_click=SendMessage("Show my ShopSphere orders."))
     return view, state
 
 
+def _apply_choices(user_id: str, co: dict, address_id: Optional[str] = None, pay_with: Optional[str] = None,
+                   delivery: Optional[str] = None, use_points=None) -> dict:
+    """Change the address, card / wallet, delivery or points of an open checkout."""
+    changes: dict = {}
+    if address_id and address_id != (co.get("address") or {}).get("address_id"):
+        changes["address_id"] = address_id
+    if pay_with == "wallet":
+        if co.get("pay_with") != "wallet":
+            changes["pay_with"] = "wallet"
+    elif pay_with:
+        if pay_with != (co.get("payment_method") or {}).get("payment_method_id") or co.get("pay_with") != "card":
+            changes.update(payment_method_id=pay_with, pay_with="card")
+    if delivery in ("standard", "express") and delivery != (co.get("delivery") or {}).get("method"):
+        changes["delivery_method"] = delivery
+    if use_points is not None:
+        want = str(use_points).lower() in ("yes", "true", "1")
+        changes["points_used"] = (co.get("points") or {}).get("max_usable", 0) if want else 0
+    if not changes:
+        return co
+    try:
+        return talkshop_tools.update_checkout(user_id, co["checkout_id"], **changes)
+    except CheckoutError as exc:
+        raise ToolError(exc.message)
+
+
 @cards.ui(annotations=WRITE)
-def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = None,
-             use_points: bool = False) -> ToolResult:
+def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = None, use_points: bool = False,
+             address_id: Optional[str] = None, payment_method_id: Optional[str] = None) -> ToolResult:
     """Prepare checkout for the signed-in shopper's cart and show the review card: items, Chase
-    offers, points, delivery, tax, total, address and saved card, with an Approve & pay
-    button. Only the shopper can press it; you can't pay. Nothing is charged by this call.
+    offers, points, delivery, tax, total, address and saved card. On the card the shopper can
+    change the address, card (or ShopSphere Wallet), delivery and points, then tap Approve & pay.
+    Only the shopper can approve; you can't pay. Nothing is charged by this call.
 
     Args:
         line_ids: optional cart line ids to buy (from show_cart); default: the whole cart.
         delivery: optional "standard" or "express".
         use_points: true to spend the shopper's points on this order.
+        address_id: optional saved address id (from saved_addresses); default: their default address.
+        payment_method_id: optional saved card id, or "wallet"; default: their default card.
     """
     user = current_customer()
     cart = talkshop_tools.get_cart(user.user_id)
@@ -567,25 +668,42 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
         raise ToolError("The ShopSphere cart is empty. Add something first.")
     try:
         co = talkshop_tools.create_checkout(user.user_id, ids)
-        changes = {}
-        if delivery in ("standard", "express"):
-            changes["delivery_method"] = delivery
-        if use_points and (co.get("points") or {}).get("max_usable"):
-            changes["points_used"] = co["points"]["max_usable"]
-        if changes:
-            co = talkshop_tools.update_checkout(user.user_id, co["checkout_id"], **changes)
     except CheckoutError as exc:
         raise ToolError(exc.message)
+    co = _apply_choices(user.user_id, co, address_id, payment_method_id, delivery, True if use_points else None)
     view, state = _checkout_view(co)
     data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "offer_discount", "points_discount",
                                    "shipping", "tax", "total", "currency", "earn_points", "ready", "issues")}
     data.update({"items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"),
                             "quantity": ln["quantity"]} for ln in co["lines"]],
                  "delivery": (co.get("delivery") or {}).get("method"), "arrives": (co.get("delivery") or {}).get("date"),
-                 "pay_with": ((co.get("payment_path") or {}).get("card") or {}).get("display"),
-                 "next_step": "The shopper approves on the card (Approve & pay, then the simulated passkey). "
-                              "Never say the order is paid unless they tell you it went through."})
+                 "ship_to": (co.get("address") or {}).get("display"),
+                 "pay_with": state["pay_with_text"],
+                 "saved_addresses": [{"address_id": a["address_id"], "label": a.get("label"), "display": a["display"]}
+                                     for a in co.get("saved_addresses") or []],
+                 "saved_payment_methods": [{"payment_method_id": c["payment_method_id"], "display": c["display"],
+                                            "issuer": c.get("issuer_display")} for c in co.get("saved_payment_methods") or []],
+                 "next_step": "The shopper can change address, card, delivery or points on the card (or ask you: call "
+                              "update_checkout_choices), then approves on the card (Approve & pay, then the simulated "
+                              "passkey). Never say the order is paid unless they tell you it went through."})
     return _ui(view, state, data)
+
+
+@cards.tool(model=True)
+def update_checkout_choices(checkout_id: str, address_id: Optional[str] = None, pay_with: Optional[str] = None,
+                            delivery: Optional[str] = None, use_points: Optional[str] = None) -> dict:
+    """Change an open ShopSphere checkout: shipping address (address_id), payment (a saved card's
+    payment_method_id, or "wallet"), delivery ("standard"/"express") and points ("yes"/"no").
+    Totals and Chase offers are recalculated (Chase offers need a Chase card). Nothing is charged."""
+    user = current_customer()
+    try:
+        co = talkshop_tools.get_checkout(user.user_id, checkout_id)
+    except CheckoutError as exc:
+        raise ToolError(exc.message)
+    if co.get("status") != "open":
+        raise ToolError("This order is already closed. Ask for a new checkout.")
+    co = _apply_choices(user.user_id, co, address_id, pay_with, delivery, use_points)
+    return _checkout_state(co)
 
 
 @cards.tool()
