@@ -299,9 +299,12 @@ def _cards_view(result: dict) -> tuple[Column, dict]:
 def search_shopsphere(query: str, category: Optional[str] = None, size: Optional[str] = None,
                       color: Optional[str] = None, max_price: Optional[float] = None,
                       gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3) -> ToolResult:
-    """Search the ShopSphere store catalog. Call this FIRST for every shopping request, before
-    web search. Shows the shopper product cards (photos, prices, size/colour pickers, Add to
-    cart) and returns the same products to you as JSON, to recommend below the cards.
+    """Find products to buy at ShopSphere, the shopper's store: shoes, running shoes, sneakers,
+    boots, clothing (dresses, jeans, jackets, sweaters, t-shirts), bags, sunglasses, watches,
+    smartwatches, earbuds, headphones, speakers, phones and laptops. Use this FIRST for ANY
+    request to find, recommend, compare or buy a product, before web search. Shows the
+    shopper product cards (photos, prices, size/colour pickers, Add to cart) and returns the
+    same products to you as JSON, to recommend below the cards.
 
     Args:
         query: what the shopper wants, in their words, e.g. "running shoes", "wireless earbuds".
