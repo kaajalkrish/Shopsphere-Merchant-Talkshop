@@ -49,11 +49,12 @@ def _error(status: int, error: str, description: str) -> JSONResponse:
 # ── Discovery ───────────────────────────────────────────────────────────────────
 
 @router.get("/.well-known/oauth-protected-resource")
-@router.get("/.well-known/oauth-protected-resource/mcp")
-@router.get("/.well-known/oauth-protected-resource/shop")
-def protected_resource(request: Request):
+@router.get("/.well-known/oauth-protected-resource/{rest:path}")
+def protected_resource(request: Request, rest: str = "mcp"):
     base = _base(request)
-    path = "/shop" if request.url.path.rstrip("/").endswith("/shop") else "/mcp"
+    path = "/" + rest.strip("/")
+    if not mcp_auth.is_mcp_path(path):
+        return _error(404, "not_found", "Unknown resource.")
     return {"resource": mcp_auth.resource_url(base, path), "authorization_servers": [base],
             "scopes_supported": ["shop"], "bearer_methods_supported": ["header"],
             "resource_name": "ShopSphere"}
@@ -219,7 +220,7 @@ def _resource(base: str, wanted) -> str:
     """The MCP address a token is for: the one the chat app asked for (/mcp or /shop)."""
     wanted = (wanted[0] if isinstance(wanted, list) and wanted else wanted) or ""
     wanted = str(wanted).rstrip("/")
-    return wanted if wanted in mcp_auth.resource_urls(base) else mcp_auth.resource_url(base)
+    return wanted if mcp_auth.is_our_resource(base, wanted) else mcp_auth.resource_url(base)
 
 
 def _pkce_ok(verifier: str, challenge: str) -> bool:
@@ -231,7 +232,7 @@ def _pkce_ok(verifier: str, challenge: str) -> bool:
 async def token(request: Request):
     form = {k: str(v) for k, v in (await request.form()).items()}
     base = _base(request)
-    if form.get("resource") and form["resource"].rstrip("/") not in mcp_auth.resource_urls(base):
+    if form.get("resource") and not mcp_auth.is_our_resource(base, form["resource"].rstrip("/")):
         return _error(400, "invalid_target", "This server only issues tokens for its MCP endpoints.")
     grant = form.get("grant_type")
     if grant == "authorization_code":

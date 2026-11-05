@@ -17,6 +17,7 @@ knows to show "Sign in to ShopSphere".
 """
 import json
 import os
+import re
 import secrets
 import time
 from typing import Optional
@@ -52,17 +53,23 @@ def public_base_url(headers: Optional[dict] = None) -> str:
     return f"{proto}://{h.get('x-forwarded-host') or h.get('host', 'localhost:8000')}"
 
 
-# The connector's addresses. /shop is the same server under a fresh address: chat apps cache a
-# connector's tool list per address, so a new one makes them load the current tools.
-MCP_PATHS = ("/mcp", "/shop")
+# The connector's addresses: /mcp, /shop and versioned ones (/shop/v2, /shop/v3, ...), all the
+# same server. Chat apps cache a connector's tool list per address, so after new tools are
+# added, connecting at the next version makes them load the current list.
+_MCP_PATH = re.compile(r"^/(mcp|shop)(/[a-z0-9-]{1,20})?$")
+
+
+def is_mcp_path(path: str) -> bool:
+    return bool(_MCP_PATH.match(path or ""))
 
 
 def resource_url(base: str, path: str = "/mcp") -> str:
-    return f"{base}{path if path in MCP_PATHS else '/mcp'}"
+    return f"{base}{path if is_mcp_path(path) else '/mcp'}"
 
 
-def resource_urls(base: str) -> list[str]:
-    return [f"{base}{p}" for p in MCP_PATHS]
+def is_our_resource(base: str, resource) -> bool:
+    """One of this server's connector addresses (any version)."""
+    return isinstance(resource, str) and resource.startswith(base) and is_mcp_path(resource[len(base):].rstrip("/"))
 
 
 def _issue(typ: str, ttl: int, **claims) -> str:
@@ -109,12 +116,15 @@ def read_refresh(token: str) -> Optional[dict]:
     return _read(token, "mcp_refresh")
 
 
-def user_for(authorization: Optional[str], resource) -> Optional[str]:
-    """The signed-in customer's user_id from an `Authorization: Bearer` header, or None."""
+def user_for(authorization: Optional[str], base: str, exact: Optional[str] = None) -> Optional[str]:
+    """The signed-in customer's user_id from an `Authorization: Bearer` header, or None. The
+    token must be for this server: for `exact` (the address used) or any of its addresses."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
-    claims = _read(authorization[7:].strip(), "mcp_access", audience=resource)
-    if not claims:
+    claims = _read(authorization[7:].strip(), "mcp_access")
+    aud = (claims or {}).get("aud")
+    auds = aud if isinstance(aud, list) else [aud]
+    if not claims or not any((a == exact) if exact else is_our_resource(base, a) for a in auds):
         return None
     from backend.db.schema import User
     from backend.db.session_utils import get_session
@@ -129,7 +139,7 @@ def current_customer() -> CurrentUser:
     from fastmcp.server.dependencies import get_http_headers
 
     headers = get_http_headers(include_all=True)
-    user_id = user_for(headers.get("authorization"), resource_urls(public_base_url(headers)))
+    user_id = user_for(headers.get("authorization"), public_base_url(headers))
     if not user_id:
         raise ToolError("Please sign in to ShopSphere first.")
     from backend.db.schema import User
@@ -147,9 +157,9 @@ class McpSignIn:
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "").rstrip("/") if scope["type"] == "http" else ""
-        if path == "/shop":                   # same MCP server under the fresh address
+        if path != "/mcp" and is_mcp_path(path):     # same MCP server under a fresh address
             scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
-        if scope["type"] != "http" or scope.get("method") != "POST" or path not in MCP_PATHS:
+        if scope["type"] != "http" or scope.get("method") != "POST" or not is_mcp_path(path):
             return await self.app(scope, receive, send)
         chunks, more = [], True
         while more:
@@ -168,7 +178,7 @@ class McpSignIn:
         wanted = {(c.get("params") or {}).get("name") for c in calls
                   if isinstance(c, dict) and c.get("method") == "tools/call"}
         needs_customer = bool(wanted & CUSTOMER_TOOLS)
-        if (auth and not user_for(auth, resource_url(base, path))) or (needs_customer and not auth):
+        if (auth and not user_for(auth, base, resource_url(base, path))) or (needs_customer and not auth):
             return await _challenge(send, base, path)
 
         sent = False
@@ -185,7 +195,7 @@ class McpSignIn:
 
 
 async def _challenge(send, base: str, path: str = "/mcp") -> None:
-    meta = f"{base}/.well-known/oauth-protected-resource{path if path in MCP_PATHS else '/mcp'}"
+    meta = f"{base}/.well-known/oauth-protected-resource{path if is_mcp_path(path) else '/mcp'}"
     body = json.dumps({"error": "invalid_token", "error_description": "Sign in to ShopSphere to continue."}).encode()
     await send({"type": "http.response.start", "status": 401, "headers": [
         (b"content-type", b"application/json"),

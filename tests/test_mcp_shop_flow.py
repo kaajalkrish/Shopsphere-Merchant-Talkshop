@@ -250,3 +250,17 @@ def test_pay_with_the_shopsphere_wallet_from_the_card(client):
     st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"], pay_with="wallet")
     assert "Wallet" in st["pay_with_text"] and st["payable"]
     assert _pay(client, token, co["checkout_id"], st)["status"] == "authorized"
+
+
+def test_versioned_addresses_are_the_same_connector(client):
+    """/shop/v2 etc.: a new address makes chat apps reload the tool list after an update."""
+    r, msg = rpc(client, "tools/list", path="/shop/v2")
+    assert "update_checkout_choices" in {t["name"] for t in msg["result"]["tools"]}
+    meta = client.get("/.well-known/oauth-protected-resource/shop/v2").json()
+    assert meta["resource"].endswith("/shop/v2")
+    assert client.get("/.well-known/oauth-protected-resource/somewhere/else").status_code == 404
+    token = sign_in(client, "chris@shopsphere.demo", resource=meta["resource"])
+    r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop/v2")
+    assert r.status_code == 200 and not msg["result"].get("isError")
+    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop/v3")
+    assert r.status_code == 401                       # a token is for the address it was issued to
