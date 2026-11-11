@@ -80,7 +80,7 @@ def authorization_server(request: Request):
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": ["shop"],
             "client_id_metadata_document_supported": True,
-            "authorization_response_iss_parameter_supported": True}
+            "authorization_response_iss_parameter_supported": False}
 
 
 # ── Clients: CIMD (URL client ids) and stateless DCR ────────────────────────────
@@ -308,7 +308,7 @@ async def authorize_submit(request: Request):
     code = mcp_auth.issue_code(sub=user_id, cid=params["client_id"], ru=params["redirect_uri"],
                                cc=params["code_challenge"],
                                res=_resource(base, params.get("resource")))
-    query = {"code": code, "iss": base, **({"state": params["state"]} if params.get("state") else {})}
+    query = {"code": code, **({"state": params["state"]} if params.get("state") else {})}
     sep = "&" if urlparse(params["redirect_uri"]).query else "?"
     mcp_auth.log_signin("authorize_submit", **_params_info(params), result="code issued, back to the app",
                         code_for=_resource(base, params.get("resource")))

@@ -63,7 +63,8 @@ def sign_in(client, email: str, password: str = "demo1234", resource: str | None
                        follow_redirects=False)
     assert done.status_code == 302, done.text
     q = parse_qs(urlparse(done.headers["location"]).query)
-    assert q["state"] == ["xyz"] and q["iss"] == [meta["issuer"]]
+    assert q["state"] == ["xyz"] and "iss" not in q and len(q["code"][0]) < 64      # short code, no iss
+    assert meta["issuer"].startswith("http")
     tok = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": q["code"][0],
                                             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
                                             "code_verifier": verifier}).json()

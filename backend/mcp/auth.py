@@ -9,7 +9,8 @@ Tokens are signed JWTs (JWT_SECRET_KEY), so nothing has to be stored and a backe
 restart doesn't sign anyone out:
   mcp_access   1 day   sub=user, aud=<this server>/mcp, cid=<chat app's client id>
   mcp_refresh  30 days same, used only at /oauth/token
-  mcp_code     5 min   the one-time authorization code (PKCE challenge inside)
+  code         5 min   the one-time authorization code: a short random value; its details
+                       (user, app, PKCE challenge) stay in this server's memory, used once
 
 McpSignIn guards /mcp: a call to a customer tool without a valid token gets HTTP 401 with
 WWW-Authenticate pointing at the protected-resource metadata, which is how the chat app
@@ -37,7 +38,7 @@ CODE_TTL = 300
 CUSTOMER_TOOLS = {"my_shopsphere_account", "checkout", "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
                   "finish_new_card_payment", "my_orders"}
 
-_used_codes: dict[str, float] = {}          # jti -> expiry: each authorization code works once
+_codes: dict[str, tuple[float, dict]] = {}   # code -> (expiry, details): each code works once
 
 # Temporary sign-in diagnostics (GET /oauth/debug/recent): the last steps of chat-app sign-ins,
 # with no personal data: no emails, passwords, codes or tokens.
@@ -105,21 +106,19 @@ def _read(token: str, typ: str, audience=None) -> Optional[dict]:
 
 
 def issue_code(**claims) -> str:
-    return _issue("mcp_code", CODE_TTL, **claims)
+    """A short one-time code for the redirect back to the chat app (some apps reject long ones)."""
+    now = time.time()
+    for c in [c for c, (exp, _) in _codes.items() if exp < now]:
+        del _codes[c]
+    code = secrets.token_urlsafe(32)
+    _codes[code] = (now + CODE_TTL, dict(claims))
+    return code
 
 
 def redeem_code(code: str) -> Optional[dict]:
-    """The code's claims, once. A second use (or an expired code) gives None."""
-    claims = _read(code, "mcp_code")
-    if not claims:
-        return None
-    now = time.time()
-    for jti in [j for j, exp in _used_codes.items() if exp < now]:
-        del _used_codes[jti]
-    if claims["jti"] in _used_codes:
-        return None
-    _used_codes[claims["jti"]] = claims["exp"]
-    return claims
+    """The code's details, once. A second use, an unknown or an expired code gives None."""
+    exp, claims = _codes.pop(code or "", (0.0, None))
+    return claims if claims and exp >= time.time() else None
 
 
 def issue_tokens(user_id: str, client_id: str, resource: str) -> dict:
