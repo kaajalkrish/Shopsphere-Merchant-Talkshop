@@ -200,7 +200,7 @@ Every payment needs your approval. Card details go only on the secure payment pa
 {f("Street address", "line1", auto="address-line1", extra='maxlength="120"')}
 {f("Apt, suite (optional)", "line2", auto="address-line2", extra='maxlength="120"', required=False)}
 <div class="three"><div>{f("City", "city", auto="address-level2", extra='maxlength="80"')}</div>
-<div>{f("State", "state", auto="address-level1", extra='maxlength="2" placeholder="TX"')}</div>
+<div>{f("State", "address_state", auto="address-level1", extra='maxlength="2" placeholder="TX"')}</div>
 <div>{f("ZIP", "postal_code", auto="postal-code", extra='maxlength="10" placeholder="78704"')}</div></div>
 <button type="submit">Create account and allow</button></form>
 <p class="switch">Already have an account? <a href="#" data-show="signin">Sign in</a></p></section>"""
@@ -260,7 +260,9 @@ def authorize_page(request: Request):
     return _page(params, client, mode=params.get("mode", "signin"))
 
 
-_ADDRESS_FIELDS = ("line1", "line2", "city", "state", "postal_code")
+# The address's state is "address_state": "state" is the chat app's own sign-in value (OAuth state),
+# which must go back to the app unchanged.
+_ADDRESS_FIELDS = ("line1", "line2", "city", "address_state", "postal_code")
 
 
 def _sign_up(params: dict) -> tuple[Optional[str], str]:
@@ -286,7 +288,8 @@ def _sign_up(params: dict) -> tuple[Optional[str], str]:
         db.flush()
         try:                                       # commits the account and its address together
             profile.add_address(db, user_id, full_name=name, label="Home", make_default=True,
-                                **{k: params.get(k, "") for k in _ADDRESS_FIELDS})
+                                **{("state" if k == "address_state" else k): params.get(k, "")
+                                   for k in _ADDRESS_FIELDS})
         except profile.ProfileError as exc:
             db.rollback()
             return None, exc.message
@@ -295,7 +298,9 @@ def _sign_up(params: dict) -> tuple[Optional[str], str]:
 
 @router.post("/oauth/authorize")
 async def authorize_submit(request: Request):
-    params = {k: str(v) for k, v in (await request.form()).items()}
+    params: dict = {}
+    for k, v in (await request.form()).multi_items():    # the first value of each field wins
+        params.setdefault(k, str(v))
     client, problem = _check(params)
     if problem:
         mcp_auth.log_signin("authorize_submit", **_params_info(params), result="refused: " + problem)

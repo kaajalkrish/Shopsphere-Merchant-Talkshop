@@ -7,7 +7,7 @@ import base64
 import hashlib
 import json
 import secrets
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -277,11 +277,13 @@ def sign_up(client, email: str, **fields) -> tuple[str, str]:
     page = client.get("/oauth/authorize", params={**params, "mode": "signup"}).text
     assert "Create your ShopSphere account" in page and "Shipping address" in page and "card_number" not in page
     form = {"mode": "signup", "name": "Riya Shah", "email": email, "password": "riya-secret-1", "line1": "12 Oak St",
-            "line2": "", "city": "Austin", "state": "tx", "postal_code": "78701", **fields}
+            "line2": "", "city": "Austin", "address_state": "tx", "postal_code": "78701", **fields}
     done = client.post("/oauth/authorize", data={**params, **form}, follow_redirects=False)
     if done.status_code != 302:
         return done.text, ""
-    code = parse_qs(urlparse(done.headers["location"]).query)["code"][0]
+    back = parse_qs(urlparse(done.headers["location"]).query)
+    assert back["state"] == ["s1"]                    # the app's own state goes back unchanged
+    code = back["code"][0]
     tok = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code,
                                             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
                                             "code_verifier": verifier}).json()
@@ -373,3 +375,21 @@ def test_add_to_cart_without_signing_in_then_sign_in_at_checkout(client):
     assert [i["quantity"] for i in co["items"]] == [1] and co["ready"]          # the visitor cart came along
     assert call(client, "show_cart", token)["item_count"] == 1
     assert call(client, "show_cart", visitor_cart=cart_id)["item_count"] == 0  # and the visitor cart is gone
+
+
+def test_the_address_state_never_replaces_the_apps_sign_in_state(client):
+    """The sign-up page has both Claude's OAuth `state` and the address's US state: they must not mix
+    (sending state=TX back made Claude refuse the sign-in)."""
+    reg = client.post("/oauth/register", json={"client_name": "Claude", "redirect_uris": [REDIRECT]}).json()
+    _, challenge = pkce()
+    params = {"response_type": "code", "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+              "state": "Ab+c/d=e~f.g_h-i", "code_challenge": challenge, "code_challenge_method": "S256"}
+    page = client.get("/oauth/authorize", params=params).text
+    assert 'name="address_state"' in page and page.count('name="state"') == 2        # hidden, in both forms
+    form = [*params.items(), ("mode", "signup"), ("name", "Tex Ann"), ("email", f"tx.{secrets.token_hex(4)}@example.com"),
+            ("password", "texas-pass-1"), ("line1", "1 Main St"), ("city", "Austin"), ("state", "TX"),
+            ("address_state", "TX"), ("postal_code", "78701")]
+    done = client.post("/oauth/authorize", content=urlencode(form),
+                       headers={"Content-Type": "application/x-www-form-urlencoded"}, follow_redirects=False)
+    assert done.status_code == 302
+    assert parse_qs(urlparse(done.headers["location"]).query)["state"] == ["Ab+c/d=e~f.g_h-i"]
