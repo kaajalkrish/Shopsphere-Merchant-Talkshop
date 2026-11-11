@@ -17,9 +17,10 @@ import hmac
 import html
 import json
 import os
+import re
 import time
 from typing import Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Request
@@ -170,23 +171,30 @@ def _field(form: dict, label: str, name: str, kind: str = "text", auto: str = ""
 
 def _page(params: dict, client: dict, error: str = "", email: str = "", mode: str = "signin",
           form: Optional[dict] = None) -> HTMLResponse:
-    """The sign-in page, with a Create account tab for new ShopSphere customers."""
+    """The sign-in page. Create account is a switch on the same page (one page, no navigation),
+    so the chat app's sign-in request is answered from exactly the page it opened."""
     form = form or {}
     signup = mode == "signup"
     hidden = "".join(f'<input type="hidden" name="{k}" value="{html.escape(params.get(k, ""), quote=True)}">'
                      for k in _KEEP)
-    kept = {k: params[k] for k in _KEEP if params.get(k)}
-    other = html.escape("/oauth/authorize?" + urlencode({**kept, "mode": "signin" if signup else "signup"}), quote=True)
     err = f'<p class="err">{html.escape(error)}</p>' if error else ""
     app = html.escape(client["name"])
     f = lambda *a, **k: _field(form, *a, **k)
-    if signup:
-        body = f"""<h1>Create your ShopSphere account</h1>
+    signin_box = f"""<section id="signin"{' hidden' if signup else ''}><h1>Sign in to ShopSphere</h1>
+<p><b>{app}</b> wants to shop for you at ShopSphere: see your cart, prepare checkouts and show your orders.
+It can never pay by itself. Every payment needs your approval.</p>{'' if signup else err}
+<form method="post" action="/oauth/authorize">{hidden}<input type="hidden" name="mode" value="signin">
+{f("Email", "email", "email", "username", value=email if not signup else "")}
+{f("Password", "password", "password", "current-password")}
+<button type="submit">Sign in and allow</button></form>
+<p class="switch">New to ShopSphere? <a href="#" data-show="signup">Create an account</a></p>
+<p class="hint">Demo accounts use the password <b>demo1234</b>, e.g. kaajal@shopsphere.demo.</p></section>"""
+    signup_box = f"""<section id="signup"{'' if signup else ' hidden'}><h1>Create your ShopSphere account</h1>
 <p>Free to join. <b>{app}</b> can then shop for you at ShopSphere, but it can never pay by itself.
-Every payment needs your approval. Card details go only on the secure payment page, never in the chat.</p>{err}
+Every payment needs your approval. Card details go only on the secure payment page, never in the chat.</p>{err if signup else ''}
 <form method="post" action="/oauth/authorize">{hidden}<input type="hidden" name="mode" value="signup">
 {f("Full name", "name", auto="name", extra='maxlength="80"')}
-{f("Email", "email", "email", "email", value=email)}
+{f("Email", "email", "email", "email", value=email if signup else "")}
 {f("Password (8 or more characters)", "password", "password", "new-password", 'minlength="8"')}
 <h2>Shipping address</h2>
 {f("Street address", "line1", auto="address-line1", extra='maxlength="120"')}
@@ -195,25 +203,14 @@ Every payment needs your approval. Card details go only on the secure payment pa
 <div>{f("State", "state", auto="address-level1", extra='maxlength="2" placeholder="TX"')}</div>
 <div>{f("ZIP", "postal_code", auto="postal-code", extra='maxlength="10" placeholder="78704"')}</div></div>
 <button type="submit">Create account and allow</button></form>
-<p class="switch">Already have an account? <a href="{other}">Sign in</a></p>"""
-    else:
-        body = f"""<h1>Sign in to ShopSphere</h1>
-<p><b>{app}</b> wants to shop for you at ShopSphere: see your cart, prepare checkouts and show your orders.
-It can never pay by itself. Every payment needs your approval.</p>{err}
-<form method="post" action="/oauth/authorize">{hidden}<input type="hidden" name="mode" value="signin">
-{f("Email", "email", "email", "username", value=email)}
-{f("Password", "password", "password", "current-password")}
-<button type="submit">Sign in and allow</button></form>
-<p class="switch">New to ShopSphere? <a href="{other}">Create an account</a></p>
-<p class="hint">Demo accounts use the password <b>demo1234</b>, e.g. kaajal@shopsphere.demo.</p>"""
-    title = "Create your ShopSphere account" if signup else "Sign in to ShopSphere"
+<p class="switch">Already have an account? <a href="#" data-show="signin">Sign in</a></p></section>"""
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to ShopSphere</title>
 <style>
  body{{font-family:system-ui,-apple-system,sans-serif;background:#f6f7f9;color:#14171c;margin:0}}
  .box{{max-width:400px;margin:40px auto;background:#fff;border:1px solid #e3e6ea;border-radius:16px;padding:28px}}
  h1{{font-size:22px;margin:0 0 6px}} h2{{font-size:16px;margin:22px 0 0}} p{{color:#555;line-height:1.45}}
- .err{{color:#b00020}}
+ .err{{color:#b00020}} [hidden]{{display:none}}
  label{{display:block;font-size:14px;margin:14px 0 6px}}
  input[type=email],input[type=password],input[type=text]{{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccd;border-radius:10px;font-size:15px}}
  .three{{display:grid;grid-template-columns:2fr 1fr 1.3fr;gap:8px}}
@@ -221,8 +218,12 @@ It can never pay by itself. Every payment needs your approval.</p>{err}
  .switch{{text-align:center;font-size:14px;margin-top:16px}} .switch a{{color:#0b2a4a;font-weight:600}}
  .hint{{font-size:13px;color:#777;margin-top:10px}}
  @media (max-width:440px){{.box{{margin:0;border-radius:0;border:0;padding:20px 16px}} .three{{grid-template-columns:1fr 1fr}}}}
-</style></head><body><div class="box">{body}</div></body></html>""",
-                        headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY"})
+</style></head><body><div class="box">{signin_box}{signup_box}</div>
+<script>document.querySelectorAll('[data-show]').forEach(function(a){{a.addEventListener('click',function(e){{
+e.preventDefault();var show=a.getAttribute('data-show');
+document.getElementById('signin').hidden=show!=='signin';document.getElementById('signup').hidden=show!=='signup';
+var first=document.querySelector('#'+show+' input:not([type=hidden])');if(first)first.focus();}});}});</script>
+</body></html>""", headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY"})
 
 
 @router.get("/oauth/debug/recent")
@@ -231,17 +232,29 @@ def signin_debug():
     return {"events": list(mcp_auth.SIGNIN_LOG)}
 
 
+def _fingerprint(value: Optional[str]) -> str:
+    """A short hash of a value (e.g. the app's state), to compare in and out without logging it."""
+    if not value:
+        return "-"
+    kinds = "".join(k for k, test in (("+", "+" in value), ("_", " " in value), ("%", "%" in value),
+                                      ("=", "=" in value), ("/", "/" in value)) if test)
+    return f"{hashlib.sha256(value.encode()).hexdigest()[:10]} len={len(value)} chars={kinds or 'plain'}"
+
+
 def _params_info(params: dict) -> dict:
     return {"client": mcp_auth.client_label(params.get("client_id")), "resource": params.get("resource") or "-",
             "redirect": params.get("redirect_uri") or "-", "scope": params.get("scope") or "-",
-            "has_state": bool(params.get("state")), "mode": params.get("mode") or "signin"}
+            "state": _fingerprint(params.get("state")), "mode": params.get("mode") or "signin"}
 
 
 @router.get("/oauth/authorize")
 def authorize_page(request: Request):
     params = dict(request.query_params)
     client, problem = _check(params)
-    mcp_auth.log_signin("authorize_page", **_params_info(params), problem=problem or "-")
+    raw = re.search(r"(?:^|&)state=([^&]*)", request.url.query or "")
+    mcp_auth.log_signin("authorize_page", **_params_info(params), problem=problem or "-",
+                        raw_state_has_plus=bool(raw and "+" in raw.group(1)),
+                        other_params=sorted(k for k in params if k not in _KEEP))
     if problem:
         return HTMLResponse(f"<p>{html.escape(problem)}</p>", status_code=400)
     return _page(params, client, mode=params.get("mode", "signin"))
@@ -309,8 +322,11 @@ async def authorize_submit(request: Request):
                                res=_resource(base, params.get("resource")))
     query = {"code": code, **({"state": params["state"]} if params.get("state") else {})}
     sep = "&" if urlparse(params["redirect_uri"]).query else "?"
+    back = f"{params['redirect_uri']}{sep}{urlencode(query)}"
+    returned = parse_qs(urlparse(back).query).get("state", [""])[0]
     mcp_auth.log_signin("authorize_submit", **_params_info(params), result="code issued, back to the app",
-                        code_for=_resource(base, params.get("resource")))
+                        code_for=_resource(base, params.get("resource")), state_back=_fingerprint(returned),
+                        back_url_len=len(back))
     return RedirectResponse(f"{params['redirect_uri']}{sep}{urlencode(query)}", status_code=302)
 
 
