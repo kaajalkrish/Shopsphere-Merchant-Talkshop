@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import secrets
 from functools import lru_cache
 from io import BytesIO
 from typing import Optional
@@ -32,7 +33,9 @@ from prefab_ui.rx import ERROR, RESULT, STATE
 from sqlalchemy.orm import Session
 
 from backend.db.init_db import CATALOG_IMAGE_DIR, get_engine
-from backend.mcp.auth import current_customer
+from backend.db.schema import User
+from backend.routers import auth as account
+from backend.mcp.auth import current_customer, optional_customer, read_visitor_cart, visitor_cart_id
 from backend.shop import card_approval, payment_routing, profile
 from backend.shop import cart as cart_service
 from backend.shop import checkout as checkout_service
@@ -65,9 +68,12 @@ ShopSphere first, always:
 3. Never invent ShopSphere products, prices, sizes or stock: use only what the tools return.
    get_shopsphere_product gives details or checks another size or colour.
 
-Buying (needs the shopper's ShopSphere sign-in; the connector asks them to sign in when needed):
+Buying. The cart needs no sign-in; checkout does (the connector asks the shopper to sign in or
+create an account then, and the cart comes with them):
 4. When the shopper picks something ("add the black one in size 10"), call add_to_cart with the
    product_id, size and colour; ask for whatever is missing. They can also tap Add to cart on a card.
+   Before sign-in, results carry a visitor_cart id: pass that same visitor_cart to every later
+   search_shopsphere, add_to_cart, show_cart and checkout call in this chat, so it stays one cart.
 5. show_cart shows the cart card; checkout shows the review card with Chase offers, points,
    delivery, tax, total, address and saved card. Pass delivery="express" or use_points=true when
    asked.
@@ -271,6 +277,7 @@ def _variant_label(size: Optional[str], color: Optional[str]) -> str:
 def _cards_view(result: dict) -> tuple[Column, dict]:
     """Product cards for one search: photo, price, size and colour pickers, Add to cart."""
     items, size = result["products"], result.get("size")
+    cart_arg = {"visitor_cart": result["visitor_cart"]} if result.get("visitor_cart") else {}
     state: dict = {}
     with Column(gap=3) as view:
         H3("ShopSphere picks" + (f" in size {size}" if size else ""))
@@ -308,7 +315,8 @@ def _cards_view(result: dict) -> tuple[Column, dict]:
                             Button("Add to cart", size="sm", on_click=CallTool("add_to_cart", arguments={
                                 "product_id": it["product_id"],
                                 "size": getattr(STATE, f"size{i}") if sizes else None,
-                                "color": getattr(STATE, f"color{i}") if colours else None, "quantity": 1},
+                                "color": getattr(STATE, f"color{i}") if colours else None, "quantity": 1,
+                                **cart_arg},
                                 onSuccess=[SetState(f"added{i}", True),
                                            ShowToast("Added to your ShopSphere cart", variant="success")],
                                 onError=_failed_toast("Couldn't add it")))
@@ -316,14 +324,17 @@ def _cards_view(result: dict) -> tuple[Column, dict]:
                                    on_click=SendMessage(f"Tell me more about the {it['name']}."))
                         with If(getattr(STATE, f"added{i}")):
                             Button("View cart & checkout", variant="secondary", size="sm",
-                                   on_click=SendMessage("Show my ShopSphere cart."))
+                                   on_click=SendMessage("Show my ShopSphere cart."
+                                                        + (f" (visitor_cart {cart_arg['visitor_cart']})"
+                                                           if cart_arg else "")))
     return view, state
 
 
 @cards.ui(annotations=READ_ONLY)
 def search_shopsphere(query: str, category: Optional[str] = None, size: Optional[str] = None,
                       color: Optional[str] = None, max_price: Optional[float] = None,
-                      gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3) -> ToolResult:
+                      gender: Optional[str] = None, brand: Optional[str] = None, limit: int = 3,
+                      visitor_cart: Optional[str] = None) -> ToolResult:
     """Find products to buy at ShopSphere, the shopper's store: shoes, running shoes, sneakers,
     boots, clothing (dresses, jeans, jackets, sweaters, t-shirts), bags, sunglasses, watches,
     smartwatches, earbuds, headphones, speakers, phones and laptops. Use this FIRST for ANY
@@ -342,19 +353,21 @@ def search_shopsphere(query: str, category: Optional[str] = None, size: Optional
         gender: optional: men, women or unisex.
         brand: optional brand name.
         limit: how many recommendations (1-5, default 3).
+        visitor_cart: the visitor_cart id from an earlier result in this chat, if any.
 
     Returns found=true with ShopSphere products in stock, or found=false: then search the web
     yourself right away (don't ask) and label those results as other stores, not ShopSphere.
     """
     result = find_products(query, category=category, size=size, color=color, max_price=max_price,
                            gender=gender, brand=brand, limit=limit)
+    _with_cart(result, visitor_cart)
     view, state = _cards_view(result)
     return _ui(view, state, result)
 
 
 @cards.ui(annotations=READ_ONLY)
 def show_shopsphere_cards(product_ids: list[str], size: Optional[str] = None,
-                          color: Optional[str] = None) -> ToolResult:
+                          color: Optional[str] = None, visitor_cart: Optional[str] = None) -> ToolResult:
     """Show specific ShopSphere products as cards (photo, price, size/colour pickers, Add to
     cart), e.g. products from an earlier search_shopsphere, to show again or compare. Pass their
     product_ids (up to 5) and the size/colour the shopper wants."""
@@ -367,11 +380,40 @@ def show_shopsphere_cards(product_ids: list[str], size: Optional[str] = None,
             picks.append(_card(p, talkshop_tools.check_variant(pid, size=size), size, color))
     result = {"store": "ShopSphere", "found": bool(picks), "query": ", ".join(product_ids or []), "size": size,
               "products": picks, "notes": [], "next_step": "Recommend these ShopSphere products only."}
+    _with_cart(result, visitor_cart)
     view, state = _cards_view(result)
     return _ui(view, state, result)
 
 
-# ── Account, cart, checkout and payment (signed-in customer) ──────────────────
+# ── Account, cart, checkout and payment ─────────────────────────────────────────
+
+def _with_cart(result: dict, visitor_cart: Optional[str]) -> None:
+    """Before sign-in, a search's cards add to this chat's visitor cart (new, or the one passed)."""
+    if result.get("products") and optional_customer() is None:
+        vid = read_visitor_cart(visitor_cart) or f"VIS{secrets.token_hex(4).upper()}"
+        result["visitor_cart"] = visitor_cart_id(vid)
+        result["next_step"] = (result.get("next_step") or "") + (
+            " The shopper isn't signed in: pass visitor_cart to later search_shopsphere, add_to_cart, "
+            "show_cart and checkout calls in this chat. Sign-in is only needed at checkout.")
+
+
+def _shopper(visitor_cart: Optional[str]) -> tuple[str, Optional[str]]:
+    """(user id, visitor_cart id) for a cart call. Signed in: the customer's cart, and a visitor
+    cart from before sign-in is moved into it. Not signed in: this chat's visitor cart."""
+    vid = read_visitor_cart(visitor_cart)
+    user = optional_customer()
+    if user:
+        if vid:
+            account.adopt_visitor(vid, user.user_id)
+        return user.user_id, None
+    vid = vid or f"VIS{secrets.token_hex(4).upper()}"
+    with Session(get_engine()) as db:
+        if not db.query(User).filter_by(user_id=vid).first():
+            account.new_visitor(db, vid)
+            db.commit()
+    return vid, visitor_cart_id(vid)
+
+
 
 @mcp.tool(annotations=READ_ONLY)
 def my_shopsphere_account() -> dict:
@@ -409,33 +451,40 @@ def _resolve_sku(product_id: str, size: Optional[str], color: Optional[str]) -> 
 
 
 @cards.tool(model=True)
-def add_to_cart(product_id: str, size: Optional[str] = None, color: Optional[str] = None, quantity: int = 1) -> dict:
-    """Add a ShopSphere product to the signed-in shopper's ShopSphere cart (the same cart as the
-    website). Needs the size (if the product has sizes) and colour. Nothing is charged."""
-    user = current_customer()
+def add_to_cart(product_id: str, size: Optional[str] = None, color: Optional[str] = None, quantity: int = 1,
+                visitor_cart: Optional[str] = None) -> dict:
+    """Add a ShopSphere product to the shopper's ShopSphere cart (no sign-in needed; once signed
+    in, the same cart as the website). Needs the size (if the product has sizes) and colour, and
+    the visitor_cart id from earlier results in this chat if there is one. Nothing is charged."""
     p, sku, color = _resolve_sku(product_id, size, color)
+    uid, cart_id = _shopper(visitor_cart)
     try:
-        cart, line_id = talkshop_tools.add_to_cart(user.user_id, sku, max(1, min(int(quantity or 1), 10)))
+        cart, line_id = talkshop_tools.add_to_cart(uid, sku, max(1, min(int(quantity or 1), 10)))
     except CartError as exc:
         raise ToolError(exc.message)
-    return {"added": p["name"], "sku": sku, "size": size, "color": color, "line_id": line_id,
-            "cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"],
-            "next_step": "Offer show_cart or checkout. Nothing has been charged."}
+    out = {"added": p["name"], "sku": sku, "size": size, "color": color, "line_id": line_id,
+           "cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"],
+           "next_step": "Offer show_cart or checkout. Nothing has been charged."}
+    if cart_id:
+        out.update(visitor_cart=cart_id, next_step=out["next_step"] + " Pass visitor_cart to show_cart and "
+                   "checkout; the shopper signs in (or creates an account) at checkout and the cart comes along.")
+    return out
 
 
 @cards.tool()
-def update_cart_line(line_id: str, quantity: int) -> dict:
+def update_cart_line(line_id: str, quantity: int, visitor_cart: Optional[str] = None) -> dict:
     """App-only (cart card buttons): set a cart line's quantity; 0 removes it."""
-    user = current_customer()
+    uid, _ = _shopper(visitor_cart)
     with Session(get_engine()) as db:
         try:
-            cart = cart_service.set_quantity(db, user.user_id, line_id, int(quantity))
+            cart = cart_service.set_quantity(db, uid, line_id, int(quantity))
         except CartError as exc:
             raise ToolError(exc.message)
     return {"cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"]}
 
 
-def _cart_view(cart: dict) -> tuple[Column, dict]:
+def _cart_view(cart: dict, cart_id: Optional[str] = None) -> tuple[Column, dict]:
+    extra = {"visitor_cart": cart_id} if cart_id else {}
     state: dict = {}
     with Column(gap=3) as view:
         H3("Your ShopSphere cart")
@@ -459,33 +508,41 @@ def _cart_view(cart: dict) -> tuple[Column, dict]:
                         with Row(gap=2, align="center"):
                             Button("−", variant="outline", size="sm", on_click=CallTool(
                                 "update_cart_line", arguments={"line_id": ln["line_id"],
-                                                               "quantity": getattr(STATE, q) - 1},
+                                                               "quantity": getattr(STATE, q) - 1, **extra},
                                 onSuccess=SetState(q, getattr(STATE, q) - 1), onError=_failed_toast()))
                             Text(f"{getattr(STATE, q)}", css_class="font-medium")
                             Button("+", variant="outline", size="sm", on_click=CallTool(
                                 "update_cart_line", arguments={"line_id": ln["line_id"],
-                                                               "quantity": getattr(STATE, q) + 1},
+                                                               "quantity": getattr(STATE, q) + 1, **extra},
                                 onSuccess=SetState(q, getattr(STATE, q) + 1), onError=_failed_toast()))
                             Button("Remove", variant="ghost", size="sm", on_click=CallTool(
-                                "update_cart_line", arguments={"line_id": ln["line_id"], "quantity": 0},
+                                "update_cart_line", arguments={"line_id": ln["line_id"], "quantity": 0, **extra},
                                 onSuccess=SetState(gone, True), onError=_failed_toast()))
         if cart["lines"]:
             Muted(f"Subtotal when shown: {_money(cart['subtotal'])}. Offers, points, delivery and tax are "
                   "added at checkout.")
-            Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."))
+            if cart_id:
+                Muted("You'll sign in or create a ShopSphere account at checkout. Your cart comes with you.")
+            Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."
+                                                    + (f" (visitor_cart {cart_id})" if cart_id else "")))
     return view, state
 
 
 @cards.ui(annotations=READ_ONLY)
-def show_cart() -> ToolResult:
-    """Show the signed-in shopper's ShopSphere cart as a card (change quantities, remove, Checkout)."""
-    user = current_customer()
-    cart = talkshop_tools.get_cart(user.user_id)
-    view, state = _cart_view(cart)
+def show_cart(visitor_cart: Optional[str] = None) -> ToolResult:
+    """Show the shopper's ShopSphere cart as a card (change quantities, remove, Checkout). No sign-in
+    needed: pass the visitor_cart id from earlier results in this chat if there is one."""
+    uid, cart_id = _shopper(visitor_cart)
+    cart = talkshop_tools.get_cart(uid)
+    view, state = _cart_view(cart, cart_id)
     data = {"items": [{k: ln.get(k) for k in ("line_id", "name", "size", "color", "quantity", "unit_price",
                                              "line_total", "in_stock")} for ln in cart["lines"]],
             "item_count": cart["item_count"], "subtotal": cart["subtotal"],
-            "next_step": "To buy, call checkout (optionally with line_ids)."}
+            "next_step": "To buy, call checkout (optionally with line_ids)"
+                         + (", passing visitor_cart; the shopper signs in or creates an account then." if cart_id
+                            else ".")}
+    if cart_id:
+        data["visitor_cart"] = cart_id
     return _ui(view, state, data)
 
 
@@ -686,7 +743,8 @@ def _apply_choices(user_id: str, co: dict, address_id: Optional[str] = None, pay
 
 @cards.ui(annotations=WRITE)
 def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = None, use_points: bool = False,
-             address_id: Optional[str] = None, payment_method_id: Optional[str] = None) -> ToolResult:
+             address_id: Optional[str] = None, payment_method_id: Optional[str] = None,
+             visitor_cart: Optional[str] = None) -> ToolResult:
     """Prepare checkout for the signed-in shopper's cart and show the review card: items, Chase
     offers, points, delivery, tax, total, address and saved card. On the card the shopper can
     change the address, card (or ShopSphere Wallet), delivery and points, then tap Approve & pay.
@@ -699,8 +757,13 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
         address_id: optional saved address id (from saved_addresses); default: their default address.
         payment_method_id: optional saved card id, "wallet", or "provider" (a new card on the secure
             payment page); default: their default card, or "provider" when they have none.
+        visitor_cart: the visitor_cart id from before sign-in, if any: that cart comes along.
     """
     user = current_customer()
+    vid = read_visitor_cart(visitor_cart)
+    moved = account.adopt_visitor(vid, user.user_id) if vid else {}
+    if line_ids:
+        line_ids = [moved.get(x, x) for x in line_ids]
     cart = talkshop_tools.get_cart(user.user_id)
     ids = [ln["line_id"] for ln in cart["lines"] if not line_ids or ln["line_id"] in line_ids]
     if not ids:

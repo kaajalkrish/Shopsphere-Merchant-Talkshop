@@ -75,18 +75,27 @@ def _adopt_visitor(visitor_id: Optional[str], customer_id: str) -> dict[str, str
     return mapping
 
 
+adopt_visitor = _adopt_visitor          # also used by the chat-app connector at checkout
+
+
+def new_visitor(session, user_id: Optional[str] = None) -> str:
+    """An anonymous visitor (no account, can't be logged in to): only a cart is kept. Not committed."""
+    user_id = user_id or f"VIS{uuid.uuid4().hex[:8].upper()}"
+    session.add(User(
+        user_id=user_id, name="Visitor",
+        email=f"{user_id.lower()}@visitor.invalid",          # placeholder; never shown
+        password_hash=hash_password(secrets.token_urlsafe(24)),  # can't be logged in to
+        status="active", is_guest=True,
+    ))
+    return user_id
+
+
 @router.post("/api/auth/visitor", response_model=AuthResponse)
 async def visitor():
     """An anonymous visitor session: browse, fill a cart and chat with Talkshop
     without an account. Nothing about the visitor is stored except the cart."""
     with get_session() as session:
-        user_id = f"VIS{uuid.uuid4().hex[:8].upper()}"
-        session.add(User(
-            user_id=user_id, name="Visitor",
-            email=f"{user_id.lower()}@visitor.invalid",          # placeholder; never shown
-            password_hash=hash_password(secrets.token_urlsafe(24)),  # can't be logged in to
-            status="active", is_guest=True,
-        ))
+        user_id = new_visitor(session)
         session.commit()
     current = CurrentUser(user_id=user_id, name="Visitor", email="", is_visitor=True)
     return AuthResponse(access_token=create_access_token(user_id), user=current)

@@ -79,7 +79,7 @@ def test_discovery_documents(client):
     assert meta["token_endpoint"].endswith("/oauth/token") and meta["registration_endpoint"].endswith("/oauth/register")
 
 
-def test_search_is_open_and_customer_tools_ask_for_sign_in(client):
+def test_search_and_cart_are_open_and_checkout_asks_for_sign_in(client):
     r, msg = rpc(client, "tools/list")
     tools = {t["name"]: t for t in msg["result"]["tools"]}
     assert {"search_shopsphere", "add_to_cart", "show_cart", "checkout", "my_orders"} <= set(tools)
@@ -87,7 +87,7 @@ def test_search_is_open_and_customer_tools_ask_for_sign_in(client):
         assert tools[app_only]["_meta"]["ui"]["visibility"] == ["app"]
     assert "model" in tools["add_to_cart"]["_meta"]["ui"]["visibility"]
     assert call(client, "search_shopsphere", query="running shoes", size="10")["found"]
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}})
+    r, _ = rpc(client, "tools/call", {"name": "checkout", "arguments": {}})
     assert r.status_code == 401
     assert 'resource_metadata="' in r.headers["www-authenticate"]
     assert "/.well-known/oauth-protected-resource/mcp" in r.headers["www-authenticate"]
@@ -186,7 +186,7 @@ def test_the_fresh_shop_address_is_the_same_connector(client):
     """/shop serves the same MCP server (a new address makes chat apps reload the tool list)."""
     r, msg = rpc(client, "tools/list", path="/shop")
     assert {"search_shopsphere", "add_to_cart", "checkout"} <= {t["name"] for t in msg["result"]["tools"]}
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, path="/shop")
+    r, _ = rpc(client, "tools/call", {"name": "checkout", "arguments": {}}, path="/shop")
     assert r.status_code == 401 and "/.well-known/oauth-protected-resource/shop" in r.headers["www-authenticate"]
     meta = client.get("/.well-known/oauth-protected-resource/shop").json()
     assert meta["resource"].endswith("/shop")
@@ -346,3 +346,29 @@ def test_sign_up_problems_are_shown_on_the_page_and_make_no_account(client):
     assert not again and "already exists" in page
     page, token = sign_up(client, "kaajal@shopsphere.demo")
     assert not token and "already exists" in page
+
+
+def test_add_to_cart_without_signing_in_then_sign_in_at_checkout(client):
+    """Browse and fill the cart as a visitor; sign in (or sign up) only at checkout; the cart comes along."""
+    r, msg = rpc(client, "tools/call", {"name": "search_shopsphere", "arguments": {"query": "running shoes", "size": "10"}})
+    found = json.loads(msg["result"]["content"][0]["text"])
+    cart_id = found["visitor_cart"]
+    assert cart_id.startswith("vc_VIS")
+    assert cart_id in json.dumps(msg["result"]["structuredContent"])           # the cards' Add to cart uses it
+    pid = found["products"][0]["product_id"]
+    colour = next(c["name"] for c in call(client, "get_shopsphere_product", product_id=pid, size="10")["all_colors"]
+                  if c["in_stock"])
+    added = call(client, "add_to_cart", product_id=pid, size="10", color=colour, visitor_cart=cart_id)
+    assert added["cart_items"] == 1 and added["visitor_cart"] == cart_id        # no sign-in asked
+    again = call(client, "show_cart", visitor_cart=cart_id)
+    assert again["item_count"] == 1 and again["visitor_cart"] == cart_id
+    assert call(client, "show_cart")["item_count"] == 0                       # another chat: its own cart
+    forged = cart_id[:-4] + ("0000" if not cart_id.endswith("0000") else "1111")
+    assert call(client, "show_cart", visitor_cart=forged)["item_count"] == 0  # a tampered id reaches nothing
+    r, _ = rpc(client, "tools/call", {"name": "checkout", "arguments": {"visitor_cart": cart_id}})
+    assert r.status_code == 401                                               # checkout: sign in now
+    _, token = sign_up(client, f"vis.{secrets.token_hex(4)}@example.com")
+    co = call(client, "checkout", token, visitor_cart=cart_id)
+    assert [i["quantity"] for i in co["items"]] == [1] and co["ready"]          # the visitor cart came along
+    assert call(client, "show_cart", token)["item_count"] == 1
+    assert call(client, "show_cart", visitor_cart=cart_id)["item_count"] == 0  # and the visitor cart is gone

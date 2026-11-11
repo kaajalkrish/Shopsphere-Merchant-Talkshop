@@ -32,9 +32,9 @@ ACCESS_TTL = 24 * 3600
 REFRESH_TTL = 30 * 24 * 3600
 CODE_TTL = 300
 
-# Tools that act for a signed-in customer. Everything else (search, product details) is open.
-CUSTOMER_TOOLS = {"my_shopsphere_account", "add_to_cart", "show_cart", "update_cart_line", "checkout",
-                  "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
+# Tools that act for a signed-in customer. Everything else is open: search, product details and
+# the cart (a visitor cart until the shopper signs in, which they do at checkout).
+CUSTOMER_TOOLS = {"my_shopsphere_account", "checkout", "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
                   "finish_new_card_payment", "my_orders"}
 
 _used_codes: dict[str, float] = {}          # jti -> expiry: each authorization code works once
@@ -164,6 +164,34 @@ def current_customer() -> CurrentUser:
     with get_session() as db:
         u = db.query(User).filter_by(user_id=user_id).first()
         return CurrentUser(user_id=u.user_id, name=u.name or "", email=u.email or "")
+
+
+def optional_customer() -> Optional[CurrentUser]:
+    """Inside an open tool: the signed-in customer if the chat app sent a valid token, else None."""
+    from fastmcp.server.dependencies import get_http_headers
+
+    headers = get_http_headers(include_all=True)
+    if not user_for(headers.get("authorization"), public_base_url(headers)):
+        return None
+    return current_customer()
+
+
+# A visitor cart (before sign-in) is named by a signed id the chat carries from tool to tool:
+# "vc_<visitor user id>_<signature>". It only reaches that anonymous cart, nothing else.
+def visitor_cart_id(visitor_id: str) -> str:
+    import hashlib
+    import hmac
+    sig = hmac.new(_secret().encode(), f"visitor:{visitor_id}".encode(), hashlib.sha256).hexdigest()[:16]
+    return f"vc_{visitor_id}_{sig}"
+
+
+def read_visitor_cart(cart_id: Optional[str]) -> Optional[str]:
+    """The visitor user id inside a valid visitor cart id, else None."""
+    import hmac
+    m = re.fullmatch(r"vc_(VIS[0-9A-F]{8,12})_[0-9a-f]{16}", (cart_id or "").strip())
+    if not m or not hmac.compare_digest(visitor_cart_id(m.group(1)), cart_id.strip()):
+        return None
+    return m.group(1)
 
 
 class McpSignIn:
