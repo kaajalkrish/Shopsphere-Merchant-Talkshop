@@ -226,10 +226,23 @@ It can never pay by itself. Every payment needs your approval.</p>{err}
                         headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY"})
 
 
+@router.get("/oauth/debug/recent")
+def signin_debug():
+    """Temporary: the last chat-app sign-in steps (no personal data), to diagnose sign-in failures."""
+    return {"events": list(mcp_auth.SIGNIN_LOG)}
+
+
+def _params_info(params: dict) -> dict:
+    return {"client": mcp_auth.client_label(params.get("client_id")), "resource": params.get("resource") or "-",
+            "redirect": params.get("redirect_uri") or "-", "scope": params.get("scope") or "-",
+            "has_state": bool(params.get("state")), "mode": params.get("mode") or "signin"}
+
+
 @router.get("/oauth/authorize")
 def authorize_page(request: Request):
     params = dict(request.query_params)
     client, problem = _check(params)
+    mcp_auth.log_signin("authorize_page", **_params_info(params), problem=problem or "-")
     if problem:
         return HTMLResponse(f"<p>{html.escape(problem)}</p>", status_code=400)
     return _page(params, client, mode=params.get("mode", "signin"))
@@ -273,11 +286,13 @@ async def authorize_submit(request: Request):
     params = {k: str(v) for k, v in (await request.form()).items()}
     client, problem = _check(params)
     if problem:
+        mcp_auth.log_signin("authorize_submit", **_params_info(params), result="refused: " + problem)
         return HTMLResponse(f"<p>{html.escape(problem)}</p>", status_code=400)
     email = params.get("email", "").strip().lower()
     if params.get("mode") == "signup":
         user_id, problem = _sign_up(params)
         if not user_id:
+            mcp_auth.log_signin("authorize_submit", **_params_info(params), result="form problem: " + problem)
             return _page(params, client, problem, email, mode="signup",
                          form={k: params.get(k, "") for k in ("name", *_ADDRESS_FIELDS)})
     else:
@@ -287,6 +302,7 @@ async def authorize_submit(request: Request):
                                                                                         u.password_hash))
             user_id = u.user_id if ok else None
         if not user_id:
+            mcp_auth.log_signin("authorize_submit", **_params_info(params), result="wrong email or password")
             return _page(params, client, "Incorrect email or password.", email)
     base = _base(request)
     code = mcp_auth.issue_code(sub=user_id, cid=params["client_id"], ru=params["redirect_uri"],
@@ -294,6 +310,8 @@ async def authorize_submit(request: Request):
                                res=_resource(base, params.get("resource")))
     query = {"code": code, "iss": base, **({"state": params["state"]} if params.get("state") else {})}
     sep = "&" if urlparse(params["redirect_uri"]).query else "?"
+    mcp_auth.log_signin("authorize_submit", **_params_info(params), result="code issued, back to the app",
+                        code_for=_resource(base, params.get("resource")))
     return RedirectResponse(f"{params['redirect_uri']}{sep}{urlencode(query)}", status_code=302)
 
 
@@ -313,8 +331,28 @@ def _pkce_ok(verifier: str, challenge: str) -> bool:
 
 @router.post("/oauth/token")
 async def token(request: Request):
-    form = {k: str(v) for k, v in (await request.form()).items()}
-    base = _base(request)
+    raw = await request.body()
+    ctype = request.headers.get("content-type", "-")
+    try:
+        form = {k: str(v) for k, v in (await request.form()).items()}
+    except Exception:                               # not a form: note what came, refuse
+        form = {}
+    res = _token(form, _base(request))
+    info = {"grant": form.get("grant_type") or "-", "client": mcp_auth.client_label(form.get("client_id")),
+            "resource": form.get("resource") or "-", "redirect": form.get("redirect_uri") or "-",
+            "has_verifier": bool(form.get("code_verifier")), "content_type": ctype[:60],
+            "basic_auth": request.headers.get("authorization", "").lower().startswith("basic"),
+            "fields": sorted(form), "body_bytes": len(raw), "status": res.status_code}
+    if res.status_code != 200:
+        try:
+            info["error"] = json.loads(res.body).get("error_description")
+        except ValueError:
+            pass
+    mcp_auth.log_signin("token", **info)
+    return res
+
+
+def _token(form: dict, base: str):
     if form.get("resource") and not mcp_auth.is_our_resource(base, form["resource"].rstrip("/")):
         return _error(400, "invalid_target", "This server only issues tokens for its MCP endpoints.")
     grant = form.get("grant_type")

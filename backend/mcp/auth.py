@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import time
+from collections import deque
 from typing import Optional
 
 import jwt
@@ -37,6 +38,21 @@ CUSTOMER_TOOLS = {"my_shopsphere_account", "add_to_cart", "show_cart", "update_c
                   "finish_new_card_payment", "my_orders"}
 
 _used_codes: dict[str, float] = {}          # jti -> expiry: each authorization code works once
+
+# Temporary sign-in diagnostics (GET /oauth/debug/recent): the last steps of chat-app sign-ins,
+# with no personal data: no emails, passwords, codes or tokens.
+SIGNIN_LOG: deque = deque(maxlen=60)
+
+
+def log_signin(step: str, **info) -> None:
+    SIGNIN_LOG.append({"t": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), "step": step, **info})
+    print("SIGNIN", step, json.dumps(info), flush=True)
+
+
+def client_label(client_id: Optional[str]) -> str:
+    if not client_id:
+        return "none"
+    return "dcr" if client_id.startswith("dcr.") else client_id[:80]
 
 
 def _secret() -> str:
@@ -179,8 +195,17 @@ class McpSignIn:
         wanted = {(c.get("params") or {}).get("name") for c in calls
                   if isinstance(c, dict) and c.get("method") == "tools/call"}
         needs_customer = bool(wanted & CUSTOMER_TOOLS)
-        if (auth and not user_for(auth, base, resource_url(base, path))) or (needs_customer and not auth):
+        methods = sorted({str(c.get("method")) for c in calls if isinstance(c, dict)})
+        if auth and not user_for(auth, base, resource_url(base, path)):
+            claims = _read(auth[7:].strip(), "mcp_access") if auth.lower().startswith("bearer ") else None
+            log_signin("mcp_401_bad_token", path=path, methods=methods, tools=sorted(t for t in wanted if t),
+                       token=("unreadable" if not claims else f"aud={claims.get('aud')}"), expected=resource_url(base, path))
             return await _challenge(send, base, path)
+        if needs_customer and not auth:
+            log_signin("mcp_401_needs_sign_in", path=path, tools=sorted(t for t in wanted if t))
+            return await _challenge(send, base, path)
+        if auth and ("initialize" in methods or "tools/list" in methods):
+            log_signin("mcp_signed_in_call", path=path, methods=methods)
 
         sent = False
 
