@@ -62,7 +62,7 @@ def protected_resource(request: Request, rest: str = "mcp"):
     if not mcp_auth.is_mcp_path(path):
         return _error(404, "not_found", "Unknown resource.")
     return {"resource": mcp_auth.resource_url(base, path), "authorization_servers": [base],
-            "scopes_supported": ["shop"], "bearer_methods_supported": ["header"],
+            "bearer_methods_supported": ["header"],
             "resource_name": "ShopSphere"}
 
 
@@ -78,7 +78,6 @@ def authorization_server(request: Request):
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": ["shop"],
             "client_id_metadata_document_supported": True,
             "authorization_response_iss_parameter_supported": False}
 

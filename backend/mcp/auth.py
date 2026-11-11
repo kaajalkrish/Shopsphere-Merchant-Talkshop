@@ -124,8 +124,7 @@ def redeem_code(code: str) -> Optional[dict]:
 def issue_tokens(user_id: str, client_id: str, resource: str) -> dict:
     return {"access_token": _issue("mcp_access", ACCESS_TTL, sub=user_id, aud=resource, cid=client_id),
             "token_type": "Bearer", "expires_in": ACCESS_TTL,
-            "refresh_token": _issue("mcp_refresh", REFRESH_TTL, sub=user_id, aud=resource, cid=client_id),
-            "scope": "shop"}
+            "refresh_token": _issue("mcp_refresh", REFRESH_TTL, sub=user_id, aud=resource, cid=client_id)}
 
 
 def read_refresh(token: str) -> Optional[dict]:
