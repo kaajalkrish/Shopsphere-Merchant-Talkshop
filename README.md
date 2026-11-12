@@ -67,10 +67,14 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v6` (also `/mcp`, `/shop`, `/shop/v5`; after new tools are added, connect at the next version, e.g. `/shop/v7`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v7` (also `/mcp`, `/shop`, `/shop/v6`; after new tools are added, connect at the next version, e.g. `/shop/v8`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
-Searching and the cart are open (a visitor cart per chat). At checkout the cart card offers three choices:
+The cards work by themselves: every button calls ShopSphere directly and the next step (cart, checkout, guest form,
+payment, tracking) opens in the same card ([`backend/mcp/card_sections.py`](backend/mcp/card_sections.py)). No
+button sends a chat message, since Claude treats messages from a card as not coming from the shopper. Claude asks the
+shopper before only two kinds of step: starting a checkout and approving a payment (the other tools are marked
+read-only). Searching and the cart are open (a visitor cart per chat). At checkout the cart offers three choices:
 
 1. **Sign in** with the ShopSphere account (same email and password as the website): saved addresses, cards, points
    and Chase offers; the visitor cart is merged into the account's cart.
@@ -83,6 +87,14 @@ Searching and the cart are open (a visitor cart per chat). At checkout the cart 
    the confirmation email and tracks the order later with `track_order` (Order ID + email; also on the website's
    Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is in the Claude connector only; the
    website still asks visitors to sign in.
+
+**Order tracking card.** `track_order` (Order ID + email), `my_orders` (signed in) and the **Track my order** button
+after paying all show the same tracking screen in the card: status and arrival date, a progress bar, a route map
+from the fulfilment center to the shopper's city with the parcel's position
+([`backend/mcp/route_map.py`](backend/mcp/route_map.py)), the seven shipment steps with their times, carrier and
+tracking ID, the items with photos, and the totals. **Refresh status** reloads it. **Simulate next step (demo)** moves
+the simulated shipment on, like the website's demo control. The map shows only the city and state, never the street
+address. `my_orders` lists recent orders with photo, status and progress, and **Track** opens one.
 
 Sign-in is OAuth 2.1 + PKCE ([`backend/oauth/server.py`](backend/oauth/server.py); Claude's published identity
 (CIMD) or registration (DCR); signed tokens bound to the exact connector address; one-time codes stored hashed in the

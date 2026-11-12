@@ -225,7 +225,9 @@ def test_case3_guest_buys_without_an_account_gets_an_email_and_tracks_the_order(
     cart, co, raw = guest_start(client, ("SSP049", None, 2), ("SSP001", "10", 1))
     card = json.dumps(raw["structuredContent"])
     assert "update_guest_checkout" in card and "g_email" in card and "card_number" not in card
-    assert "Chase" not in card and "points" not in card.lower()          # no account-only benefits
+    from tests.test_mcp_guest_card_ui import CardDriver
+    shown = CardDriver(client, raw["structuredContent"]).texts()
+    assert "Chase" not in shown and "points" not in shown.lower() and "Wallet" not in shown   # no account-only benefits
     early, _ = tool(client, "start_guest_payment", guest_token=co["guest_token"],
                     checkout_version=co["checkout_version"], final_amount=co["total"], currency="USD")
     assert "error" in early                                              # no details yet: can't pay

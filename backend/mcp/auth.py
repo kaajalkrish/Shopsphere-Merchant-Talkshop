@@ -36,8 +36,8 @@ CODE_TTL = 300
 
 # Tools that act for a signed-in customer. Everything else is open: search, product details and
 # the cart (a visitor cart until the shopper signs in, which they do at checkout).
-CUSTOMER_TOOLS = {"my_shopsphere_account", "checkout", "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
-                  "finish_new_card_payment", "my_orders"}
+CUSTOMER_TOOLS = {"my_shopsphere_account", "checkout", "open_checkout", "update_checkout_choices", "approve_and_pay",
+                  "start_new_card_payment", "finish_new_card_payment", "my_orders"}
 
 # Temporary sign-in diagnostics (GET /oauth/debug/recent): the last steps of chat-app sign-ins,
 # with no personal data: no emails, passwords, codes or tokens.

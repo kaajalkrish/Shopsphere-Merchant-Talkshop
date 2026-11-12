@@ -227,7 +227,7 @@ def test_change_address_card_and_delivery_on_the_checkout_card_then_pay(client):
     mc = next(c for c in co["saved_payment_methods"] if "Mastercard" in c["display"])
     r, msg = rpc(client, "tools/call", {"name": "checkout", "arguments": {}}, token)
     page = json.dumps(msg["result"]["structuredContent"])
-    assert "Change your order" in page and "Ship to Work" in page and "Update order" in page   # the choices are on the card
+    assert "Change your order" in page and "Ship to Work" in page and "update_checkout_choices" in page  # choices on the card
     st = call(client, "update_checkout_choices", token, checkout_id=co["checkout_id"], address_id=work["address_id"],
               pay_with=mc["payment_method_id"], delivery="express")
     assert "Work" in st["ship_to"] or "Lavaca" in st["ship_to"]
