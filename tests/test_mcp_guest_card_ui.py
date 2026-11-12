@@ -219,7 +219,11 @@ def _empty_cart(client, token):
 
 
 def _guest_pays_in_the_card(client, ui: CardDriver) -> str:
-    """From the guest form to the confirmation and tracking, all on one card."""
+    """From the guest form to the confirmation and tracking, all on one card (the shopper chose to
+    type different details instead of their authorized profile)."""
+    assert "I have your shipping information available" in ui.texts()
+    assert "g_name" not in ui.inputs()                              # no form until they ask for it
+    ui.click("Enter different details")
     shown = ui.texts()
     assert "Guest checkout at ShopSphere" in shown and "Add your name, email and shipping address." in shown
     assert {"g_name", "g_email", "g_line1", "g_line2", "g_city", "g_state", "g_zip", "delivery"} <= ui.inputs()
@@ -327,6 +331,39 @@ def test_a_stale_customer_token_never_turns_guest_checkout_into_a_sign_in(client
         for customer_tool in ("checkout", "open_checkout", "my_orders"):
             r, _ = rpc(client, "tools/call", {"name": customer_tool, "arguments": {}}, bad)
             assert r.status_code == 401 and "resource_metadata" in r.headers["www-authenticate"]
+
+
+def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_form(client):
+    """Cart card → Check out as guest → "Yes, use it" → a sandbox card → Approve & pay: no form,
+    no card entry, no sign-in; the order is placed once and tracked in the card."""
+    found, _ = card_of(client, "search_shopsphere", query="running shoes", size="10")
+    call(client, "add_to_cart", product_id="SSP001", size="10", color="Black", visitor_cart=found["visitor_cart"])
+    _, cart_card = card_of(client, "show_cart", visitor_cart=found["visitor_cart"])
+    ui = CardDriver(client, cart_card)
+    ui.click("Check out as guest")
+    shown = ui.texts()
+    assert "I have your shipping information available" in shown and "Jordan Lee" in shown
+    assert "San Francisco, CA 94105" in shown and "g_name" not in ui.inputs()
+    assert not [b for b in ui.buttons() if b.startswith("Approve & pay")]
+    ui.click("Yes, use it")
+    assert ui.tool_calls[-1] == "card_use_guest_profile" and ui.state["profile_used"]
+    assert "Ship to: Jordan Lee, San Francisco, CA 94105" in ui.texts()
+    assert {"Visa •••• 4242 (sandbox)", "Mastercard •••• 4444 (sandbox)"} <= set(ui.buttons())
+    ui.fill(delivery="express")
+    ui.click("Visa •••• 4242 (sandbox)")
+    assert ui.tool_calls[-1] == "card_review_guest_order" and ui.state["review_ready"]
+    assert "Pay with: Visa •••• 4242 (sandbox)" in ui.texts() and "Delivery: Express" in ui.texts()
+    ui.click(f"Approve & pay {ui.state['total_text']}")
+    assert ui.tool_calls[-1] == "place_order" and ui.state["paid"] and ui.sign_in_requests == 0
+    order_id = ui.state["order_ref"]
+    shown = ui.texts()
+    assert re.fullmatch(r"SS-\d{5}", order_id) and "✓ Your ShopSphere order has been placed" in shown
+    assert "Confirmation sent to: j***@guest.shopsphere.demo" in shown
+    with get_session() as db:
+        (order,) = db.query(Order).filter(Order.display_id == order_id).all()
+        assert order.payment_last4 == "4242" and order.guest_email == "jordan.lee@guest.shopsphere.demo"
+    ui.click("Track my order")
+    assert ui.state["t_order_id"] == order_id
 
 
 def test_the_model_path_is_a_conversation_and_the_button_path_keeps_the_form(client):

@@ -129,7 +129,8 @@ def cart_section() -> None:
 GUEST_REFRESHED = ("version", "total", "total_text", "subtotal_text", "tax_text", "delivery_label", "shipping_text",
                    "arrives", "has_details", "ship_to", "contact", "payable", "problem", "lines")
 # What opening a guest checkout puts on the card (STATE.currency is a Prefab helper, so: pay_currency).
-GUEST_OPENED = (*GUEST_REFRESHED, "guest_token", "checkout_id", "pay_currency", "delivery")
+GUEST_OPENED = (*GUEST_REFRESHED, "guest_token", "checkout_id", "pay_currency", "delivery", "has_profile",
+                "profile_text", "profile_used", "typing", "g_cards", "review_ready", "authorization", "pay_with_text")
 GUEST_FIELDS = {"g_name": "full_name", "g_email": "email", "g_line1": "line1", "g_line2": "line2",
                 "g_city": "city", "g_state": "state", "g_zip": "postal_code"}
 
@@ -165,15 +166,73 @@ def guest_card_state(co: Optional[dict] = None, token: str = "") -> dict:
         "checkout_id": "", "version": 0, "total": 0.0, "currency": "USD", "total_text": "", "subtotal_text": "",
         "tax_text": "", "delivery_label": "", "shipping_text": "", "arrives": "", "has_details": False,
         "ship_to": "", "contact": "", "payable": False, "problem": "", "lines": []}
+    from backend.shop import guest_wallet           # the shopper's authorized (fictional demo) profile
+    offer = guest_wallet.offer() if co else {"available": False}
     return {**st, "guest_open": bool(co), "guest_token": token, "pay_currency": st["currency"],
             "delivery": ((co or {}).get("delivery") or {}).get("method") or "standard",
             "paid": False, "order_ref": "", "handing_off": False, "hosted_url": "", "session_id": "",
-            "sent_to": "", "email_note": "", **{k: "" for k in GUEST_FIELDS}}
+            "sent_to": "", "email_note": "", **{k: "" for k in GUEST_FIELDS},
+            # profile path: use the saved shipping info, pick a sandbox card, review, approve
+            "has_profile": bool(offer.get("available")),
+            "profile_text": f"{offer['name']} · {offer['ship_to']}" if offer.get("available") else "",
+            "profile_used": False, "typing": False,
+            "g_cards": [], "review_ready": False, "authorization": "", "pay_with_text": ""}
+
+
+def _guest_profile_steps() -> None:
+    """The guest's authorized profile: use the saved shipping info, pick a sandbox card, review,
+    then Approve & pay (place_order: Claude asks the shopper first). No form, no card entry."""
+    S = STATE
+    with If(~S.profile_used):
+        Separator()
+        Text("I have your shipping information available", css_class="font-medium")
+        Muted(f"{S.profile_text}")
+        Muted("From your authorized profile (fictional demo profile). Use it for this order?")
+        with Row(gap=2, css_class="flex-wrap"):
+            Button("Yes, use it", on_click=CallTool(
+                "card_use_guest_profile", arguments={"guest_token": S.guest_token},
+                onSuccess=[*_set_from_result(GUEST_REFRESHED), *_set_from_result(("profile_used", "g_cards")),
+                           SetState("g_email", RESULT.track_email)],
+                onError=failed_toast("Couldn't use your saved details")))
+            Button("Enter different details", variant="outline", on_click=SetState("typing", True))
+    with If(S.profile_used), If(~S.review_ready):
+        Separator()
+        Text("How would you like to pay?", css_class="font-medium")
+        with Select(name="delivery", value="standard", size="sm"):
+            SelectOption(value="standard", label="Standard delivery (free)")
+            SelectOption(value="express", label=f"Express delivery (+{money(EXPRESS_PRICE)})")
+        with ForEach("g_cards") as c:
+            Button(f"{c.label}", variant="outline", on_click=CallTool(
+                "card_review_guest_order", arguments={"guest_token": S.guest_token, "payment_method_id": c.id,
+                                                      "delivery": S.delivery},
+                onSuccess=_set_from_result((*GUEST_REFRESHED, "review_ready", "authorization", "pay_with_text")),
+                onError=failed_toast("Couldn't review the order")))
+        Muted("Sandbox cards from your profile: ShopSphere and Claude see only the network and last 4 digits. "
+              "Choosing one shows the final total to approve.")
+    with If(S.review_ready):
+        Muted(f"{S.pay_with_text}")
+
+
+def _guest_profile_pay() -> None:
+    S = STATE
+    with If(S.review_ready), If(~S.paid):
+        Button(f"Approve & pay {S.total_text}", on_click=CallTool(
+            "place_order", arguments={"guest_token": S.guest_token, "authorization": S.authorization,
+                                      "customer_confirmed": True},
+            onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
+                       SetState("sent_to", RESULT.confirmation_sent_to), SetState("arrives", RESULT.arrives),
+                       SetState("email_note", ""),
+                       ShowToast("Payment approved", variant="success")],
+            onError=failed_toast("Payment not completed")))
+        Muted("Claude asks you to allow the payment. Then ShopSphere checks this exact order again, runs the "
+              "(simulated) card approval and payment, and places the order once.")
+        Button("Change card or delivery", variant="ghost", size="sm", on_click=SetState("review_ready", False))
 
 
 def guest_section() -> None:
-    """Items and totals, the guest's own details form (typed here, sent straight to ShopSphere),
-    delivery, then Approve & pay -> secure payment page -> confirmation -> tracking."""
+    """Items and totals; the shopper's authorized profile (use it, pick a sandbox card, Approve & pay),
+    or their own details form (typed here, sent straight to ShopSphere) and a new card on the secure
+    payment page; then confirmation -> tracking."""
     S = STATE
     H3("Guest checkout at ShopSphere")
     Muted("No account needed. Your details are used for this order only.")
@@ -188,11 +247,16 @@ def guest_section() -> None:
             with Row(gap=2, css_class="justify-between"):
                 Text("Total", css_class="font-semibold")
                 Text(f"{S.total_text}", css_class="font-semibold")
-            Muted(f"{S.ship_to}")
-            with If(S.contact):
-                Muted(f"{S.contact}")
-            Muted("Pay with: a new card on the secure payment page (used once, not saved)")
-            with If(~S.paid):
+            with If(S.profile_used):
+                Muted(f"{S.ship_to}")
+            with If(S.has_profile), If(~S.typing), If(~S.paid):
+                _guest_profile_steps()
+            with If(~S.has_profile | S.typing):
+                Muted(f"{S.ship_to}")
+                with If(S.contact):
+                    Muted(f"{S.contact}")
+                Muted("Pay with: a new card on the secure payment page (used once, not saved)")
+            with If(~S.paid), If(~S.has_profile | S.typing):
                 Separator()
                 Text("Your details", css_class="font-medium")
                 with Grid(columns={"default": 1, "sm": 2}, gap=2):
@@ -217,9 +281,10 @@ def guest_section() -> None:
                 Muted("Your name, email and address go straight to ShopSphere for this order; no account is "
                       "created. Card details go only on the secure payment page, never in the chat.")
         with CardFooter(), Column(gap=2):
-            with If(~S.payable), If(~S.paid):
+            _guest_profile_pay()
+            with If(~S.payable), If(~S.paid), If(~S.has_profile | S.typing):
                 Muted(f"{S.problem}")
-            with If(S.payable), If(~S.paid):
+            with If(S.payable), If(~S.paid), If(~S.has_profile | S.typing):
                 with If(~S.handing_off):
                     Button(f"Approve & pay {S.total_text}", on_click=CallTool(
                         "start_guest_payment", arguments={

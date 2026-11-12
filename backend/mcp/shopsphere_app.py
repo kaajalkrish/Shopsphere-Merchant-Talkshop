@@ -1034,6 +1034,10 @@ def use_guest_profile(guest_token: str, use_shipping: bool = True) -> dict:
     account). Returns the estimated delivery date, the updated total and the payment methods
     available from the profile (sandbox cards, shown as network + last 4 only), to ask which one
     to use. Nothing is charged."""
+    return _use_profile(guest_token, use_shipping)
+
+
+def _use_profile(guest_token: str, use_shipping: bool) -> dict:
     user, checkout_id = _guest(guest_token)
     prof = guest_wallet.load()
     if not prof:
@@ -1067,6 +1071,39 @@ def use_guest_profile(guest_token: str, use_shipping: bool = True) -> dict:
                         "Ask for the guest's name, email and shipping address and call update_guest_checkout, then "
                         "ask which payment method to use."}
     return out
+
+
+def _guest_screen(guest_token: str) -> dict:
+    """The guest card's refreshed values for this guest's checkout."""
+    user, cid = _guest(guest_token)
+    with Session(get_engine()) as db:
+        co = checkout_service.snapshot(db, checkout_service.get_checkout(db, user.user_id, cid))
+    st = screens.guest_state(co)
+    return {k: st[k] for k in screens.GUEST_REFRESHED}
+
+
+@cards.tool()
+def card_use_guest_profile(guest_token: str) -> dict:
+    """App-only: "Yes, use it" on the guest card. Ships this order to the shopper's authorized
+    profile (this order only) and returns the profile's sandbox cards for the card to show."""
+    out = _use_profile(guest_token, True)
+    cards_ = out["payment_methods"]
+    prof = guest_wallet.load() or {}
+    return {**_guest_screen(guest_token), "profile_used": True,
+            "g_cards": [{"id": c["payment_method_id"], "label": c["display"]} for c in cards_],
+            # the profile's own (fictional) email, so the card's Track button can find the order later
+            "track_email": (prof.get("contact") or {}).get("email", "")}
+
+
+@cards.tool()
+def card_review_guest_order(guest_token: str, payment_method_id: str, delivery: Optional[str] = None) -> dict:
+    """App-only: "Review order" on the guest card. The same final check as review_order: live stock,
+    price, tax, shipping, then the authorization request for exactly this order."""
+    out = _review(guest_token, None, payment_method_id, delivery, None)
+    if not out.get("authorization"):
+        raise ToolError(out.get("next_step") or "This order isn't ready yet.")
+    return {**_guest_screen(guest_token), "review_ready": True, "authorization": out["authorization"],
+            "pay_with_text": f"Pay with: {out['pay_with']}"}
 
 
 def _owner(guest_token: Optional[str], checkout_id: Optional[str]):
@@ -1106,6 +1143,11 @@ def review_order(guest_token: Optional[str] = None, checkout_id: Optional[str] =
     stock, price, tax, shipping and the delivery date. Returns the summary to show and an
     authorization request for exactly this order (15 min). Ask "Do you authorize me to place this
     order?"; only on a clear yes call place_order. Nothing is charged."""
+    return _review(guest_token, checkout_id, payment_method_id, delivery, use_points)
+
+
+def _review(guest_token: Optional[str], checkout_id: Optional[str], payment_method_id: Optional[str],
+            delivery: Optional[str], use_points: Optional[str]) -> dict:
     user, cid, guest = _owner(guest_token, checkout_id)
     uid = user.user_id
     with Session(get_engine()) as db:
