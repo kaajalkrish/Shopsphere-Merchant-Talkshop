@@ -26,8 +26,11 @@ services:
         value: "true"
       - key: CATALOG_SOURCES
         value: shopsphere
-      - key: COMMERCE_DB_PATH
-        value: /tmp/shopsphere-demo.db
+      - key: COMMERCE_DB_PATH          # ephemeral; to keep accounts/orders: a persistent disk (paid
+        value: /tmp/shopsphere-demo.db  # instance) mounted at /var/data and /var/data/shopsphere.db here
+      # Optional, entered in the dashboard (never in this file):
+      #   SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM   real confirmation emails
+      #   OAUTH_DEBUG_TOKEN (16+ chars)   turns on GET /oauth/debug/recent (header X-Debug-Token)
       - key: OTEL_SDK_DISABLED          # no trace collector on Render
         value: "true"
       # Random per deployment, never the public demo defaults

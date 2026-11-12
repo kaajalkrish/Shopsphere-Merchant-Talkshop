@@ -82,7 +82,8 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
                   instruction_id: Optional[str] = None, *, action: Optional[str] = None,
                   checkout_version: Optional[int] = None, final_amount: Optional[float] = None,
                   currency: Optional[str] = None, return_url: Optional[str] = None,
-                  provider_session: Optional[dict] = None, approval_id: Optional[str] = None) -> dict:
+                  provider_session: Optional[dict] = None, approval_id: Optional[str] = None,
+                  guest: bool = False) -> dict:
     """consent_mode: "button" (Approve & Pay tapped) or "typed" (GO AHEAD typed in Talkshop
     on the Visa path, still followed by the passkey). CH-8: there is no automatic or
     countdown consent — any other mode is refused. The Visa path also needs the
@@ -99,7 +100,13 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
     Simulated Secure Payment Provider and returns {"status": "provider_handoff", …};
     the customer finishes on the provider's own page; complete_provider() then
     re-enters here with the provider's verified, SAFE result (provider_session) and
-    the normal GreenLight → PayIt → order path runs, PayIt capturing the session."""
+    the normal GreenLight → PayIt → order path runs, PayIt capturing the session.
+
+    guest=True (the chat connector's guest checkout only, after it checked the guest's signed
+    checkout token): an anonymous visitor's own guest checkout, paid ONLY with a new card on the
+    provider's page (one-time: never saved), with guest contact + shipping details present.
+    Every other rule (scope, version, refresh, GreenLight, PayIt, single order) is the same.
+    The website's routes never pass it, so they stay customer-only."""
     # Imported here: the routers import this module's callers.
     from backend.routers.authorizations import ApproveRequest, approve_authorization
     from backend.routers.payments import ExecutePaymentRequest, execute_payment_endpoint
@@ -113,13 +120,20 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
 
     with get_session() as db:
         from backend.shop import eligibility       # second line of defence (CH-2): a signed-in customer
-        code = eligibility.check_access(db, user)  # (any issuer) …
-        if code:
-            raise checkout_service.CheckoutError(code, eligibility.MESSAGES[code], 403)
-        co = checkout_service.get_checkout(db, user.user_id, checkout_id)
-        code = eligibility.check_payment(db, user, co.pay_with or "card")   # … who is a credit-card holder
-        if code:
-            raise checkout_service.CheckoutError(code, eligibility.MESSAGES[code], 403)
+        if guest:                                   # … or a guest on their own guest checkout, new card only
+            co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+            if not (user.is_visitor and checkout_service.is_guest_owner(db, user.user_id)
+                    and co.pay_with == "provider"):
+                raise checkout_service.CheckoutError(
+                    "GUEST_NEW_CARD_ONLY", "Guest checkout is paid with a new card on the secure payment page.", 403)
+        else:
+            code = eligibility.check_access(db, user)  # (any issuer) …
+            if code:
+                raise checkout_service.CheckoutError(code, eligibility.MESSAGES[code], 403)
+            co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+            code = eligibility.check_payment(db, user, co.pay_with or "card")   # … who is a credit-card holder
+            if code:
+                raise checkout_service.CheckoutError(code, eligibility.MESSAGES[code], 403)
         completing = provider_session is not None
         if completing:
             if co.status != "awaiting_payment" or co.provider_session_id != provider_session.get("payment_session_id"):
@@ -553,7 +567,7 @@ def _credential_trace(res: dict) -> list[dict]:
     return rows
 
 
-async def complete_provider(user: CurrentUser, checkout_id: str, session_id: str) -> dict:
+async def complete_provider(user: CurrentUser, checkout_id: str, session_id: str, guest: bool = False) -> dict:
     """The provider's page says the card step is done. ShopSphere asks the provider itself
     (server-to-server) for the SAFE result — never trusting the browser — checks it is the
     payment this order's approval was for, and only once the card is tokenized AND verified
@@ -612,7 +626,7 @@ async def complete_provider(user: CurrentUser, checkout_id: str, session_id: str
         db.commit()
     try:
         done = await confirm(user, checkout_id, True, "button", action="PAY", checkout_version=res["checkout_version"],
-                             final_amount=res["amount"], currency=res["currency"], provider_session=res)
+                             final_amount=res["amount"], currency=res["currency"], provider_session=res, guest=guest)
         done["trace"] = _credential_trace(res) + done.get("trace", [])
         done["card"] = f"{cards.network_display(res.get('network'))} •••• {res.get('last4')}"
         return done

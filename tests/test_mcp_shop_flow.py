@@ -346,6 +346,8 @@ def test_sign_up_problems_are_shown_on_the_page_and_make_no_account(client):
     _, token = sign_up(client, email)
     assert token                                                            # the email was still free
     page, again = sign_up(client, email)
+    assert again and not page                       # a retry with the same password signs in (no duplicate)
+    page, again = sign_up(client, email, password="other-pass-9")
     assert not again and "already exists" in page
     page, token = sign_up(client, "kaajal@shopsphere.demo")
     assert not token and "already exists" in page

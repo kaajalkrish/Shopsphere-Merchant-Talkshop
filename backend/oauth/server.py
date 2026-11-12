@@ -188,6 +188,7 @@ It can never pay by itself. Every payment needs your approval.</p>{'' if signup 
 {f("Password", "password", "password", "current-password")}
 <button type="submit">Sign in and allow</button></form>
 <p class="switch">New to ShopSphere? <a href="#" data-show="signup">Create an account</a></p>
+<p class="hint">Prefer not to make an account? Close this window and choose <b>Check out as guest</b> in the chat.</p>
 <p class="hint">Demo accounts use the password <b>demo1234</b>, e.g. kaajal@shopsphere.demo.</p></section>"""
     signup_box = f"""<section id="signup"{'' if signup else ' hidden'}><h1>Create your ShopSphere account</h1>
 <p>Free to join. <b>{app}</b> can then shop for you at ShopSphere, but it can never pay by itself.
@@ -227,8 +228,14 @@ var first=document.querySelector('#'+show+' input:not([type=hidden])');if(first)
 
 
 @router.get("/oauth/debug/recent")
-def signin_debug():
-    """Temporary: the last chat-app sign-in steps (no personal data), to diagnose sign-in failures."""
+def signin_debug(request: Request):
+    """The last chat-app sign-in steps (no personal data: no emails, passwords, codes or tokens),
+    to diagnose sign-in failures. Off unless OAUTH_DEBUG_TOKEN is set on the server, and then only
+    with that value in the X-Debug-Token header; otherwise it doesn't exist (404)."""
+    want = os.getenv("OAUTH_DEBUG_TOKEN", "")
+    given = request.headers.get("x-debug-token", "")
+    if len(want) < 16 or not hmac.compare_digest(want.encode(), given.encode()):
+        return _error(404, "not_found", "Not found.")
     return {"events": list(mcp_auth.SIGNIN_LOG)}
 
 
@@ -263,6 +270,7 @@ def authorize_page(request: Request):
 # The address's state is "address_state": "state" is the chat app's own sign-in value (OAuth state),
 # which must go back to the app unchanged.
 _ADDRESS_FIELDS = ("line1", "line2", "city", "address_state", "postal_code")
+ACCOUNT_EXISTS = "An account with this email already exists. Sign in with its password below."
 
 
 def _sign_up(params: dict) -> tuple[Optional[str], str]:
@@ -281,9 +289,16 @@ def _sign_up(params: dict) -> tuple[Optional[str], str]:
     if account.probe_blocked(email):
         return None, "Too many attempts for this email. Please wait 15 minutes, or sign in instead."
     with get_session() as db:
-        if db.query(User).filter(func.lower(User.email) == email).first():
+        existing = db.query(User).filter(func.lower(User.email) == email).first()
+        if existing:
+            # A retry after the account was already made (e.g. the app's sign-in failed afterwards):
+            # the same email + password signs in to that account instead of making a duplicate.
+            if (not existing.is_guest and existing.status == "active"
+                    and verify_password(password, existing.password_hash)):
+                mcp_auth.log_signin("signup_retry_signed_in")
+                return existing.user_id, ""
             account.note_signup_probe(email)
-            return None, "An account with this email already exists. Sign in instead."
+            return None, ACCOUNT_EXISTS
         user_id = account.add_customer(db, name, email, password, source="chat_app")
         db.flush()
         try:                                       # commits the account and its address together
@@ -310,6 +325,8 @@ async def authorize_submit(request: Request):
         user_id, problem = _sign_up(params)
         if not user_id:
             mcp_auth.log_signin("authorize_submit", **_params_info(params), result="form problem: " + problem)
+            if problem == ACCOUNT_EXISTS:              # show Sign in, with the email filled in
+                return _page(params, client, problem, email, mode="signin")
             return _page(params, client, problem, email, mode="signup",
                          form={k: params.get(k, "") for k in ("name", *_ADDRESS_FIELDS)})
     else:

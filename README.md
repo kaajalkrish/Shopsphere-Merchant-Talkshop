@@ -67,16 +67,41 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v4` (also `/mcp`, `/shop`; after new tools are added, connect at the next version, e.g. `/shop/v5`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v5` (also `/mcp`, `/shop`, `/shop/v4`; after new tools are added, connect at the next version, e.g. `/shop/v6`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
-Searching and the cart are open (a visitor cart per chat); checkout asks the shopper to sign in once with their ShopSphere account, and the cart comes along
-(OAuth 2.1 + PKCE, [`backend/oauth/server.py`](backend/oauth/server.py); Claude's published identity (CIMD) or
-registration (DCR); stateless signed tokens, so a restart doesn't sign anyone out). New shoppers use "Create an
-account" on that page (name, email, password, shipping address; never a card). Paying is only the shopper's tap on
-the card: that tool is app-only, so Claude can't call it. A new card is typed only on the simulated secure payment
-provider's page, which the card opens in a browser tab (with an optional "save"); Claude never sees it. In claude.ai: Settings -> Connectors -> Add custom connector ->
-that URL -> Authentication "Sign in when needed".
+Searching and the cart are open (a visitor cart per chat). At checkout the cart card offers three choices:
+
+1. **Sign in** with the ShopSphere account (same email and password as the website): saved addresses, cards, points
+   and Chase offers; the visitor cart is merged into the account's cart.
+2. **Create an account** on the same sign-in page (name, email, password, shipping address; never a card). A retry
+   with the same email and password signs in to the account already made instead of failing.
+3. **Check out as guest**: no account and no sign-in (`guest_checkout`). The guest types name, email and shipping
+   address on the guest checkout card, pays with a new card on the secure payment page (used once, never saved), gets
+   the confirmation email and tracks the order later with `track_order` (Order ID + email; also on the website's
+   Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is in the Claude connector only; the
+   website still asks visitors to sign in.
+
+Sign-in is OAuth 2.1 + PKCE ([`backend/oauth/server.py`](backend/oauth/server.py); Claude's published identity
+(CIMD) or registration (DCR); signed tokens bound to the exact connector address; one-time codes stored hashed in the
+database, so any server worker can redeem them). A guest is identified by a signed 2-hour token for one guest
+checkout ([`backend/shop/guest_checkout.py`](backend/shop/guest_checkout.py)). Paying is only the shopper's own tap
+on the card: those tools are app-only (Claude can't call them), and the backend still checks the exact approved
+version + total and the owner of the checkout. A new card is typed only on the simulated secure payment provider's
+page, which the card opens in a browser tab; Claude never sees it. In claude.ai: Settings -> Connectors -> Add custom
+connector -> that URL -> Authentication "Sign in when needed".
+
+Sign-in diagnostics (`GET /oauth/debug/recent`, no personal data) are off unless `OAUTH_DEBUG_TOKEN` (16+ characters)
+is set on the server; then send it in the `X-Debug-Token` header.
+
+**Data on Render.** The Blueprint keeps SQLite in `/tmp` (free plan): every restart, redeploy or spin-down starts a
+fresh demo database, so new accounts, orders and guest tracking are lost. To keep them, give the service a persistent
+disk (a paid Render instance; e.g. mount `/var/data`) and set `COMMERCE_DB_PATH=/var/data/shopsphere.db`. Start-up
+seeding only adds missing demo rows, so existing accounts and orders stay.
+
+**Confirmation emails.** Sent over SMTP when `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` (and optionally
+`SMTP_FROM`, `SMTP_SECURITY`) are set ([`backend/shop/mailer.py`](backend/shop/mailer.py)); otherwise they stay in the
+demo outbox and the order card says so. Addresses like `.demo` / `example.com` are never sent.
 
 **Deploying a change:** edit locally → `python -m pytest tests/` and `cd frontend; npm run build` → commit → push to
 `main` (`git push shopsphere HEAD:main`) → Vercel and Render redeploy automatically.

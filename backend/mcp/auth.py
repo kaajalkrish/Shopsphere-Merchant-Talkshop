@@ -1,16 +1,17 @@
 """
 Sign-in for the ShopSphere MCP connector (Claude / ChatGPT).
 
-Searching is open. Cart, checkout, payment and orders need the customer's ShopSphere
-account: the chat app signs the customer in once through ShopSphere's OAuth 2.1 server
-(backend/oauth/server.py) and then sends `Authorization: Bearer <token>` to /mcp.
+Searching, the cart, guest checkout and guest order tracking are open. Customer checkout,
+saved details and "my orders" need the customer's ShopSphere account: the chat app signs the
+customer in once through ShopSphere's OAuth 2.1 server (backend/oauth/server.py) and then
+sends `Authorization: Bearer <token>` to /mcp.
 
-Tokens are signed JWTs (JWT_SECRET_KEY), so nothing has to be stored and a backend
-restart doesn't sign anyone out:
-  mcp_access   1 day   sub=user, aud=<this server>/mcp, cid=<chat app's client id>
-  mcp_refresh  30 days same, used only at /oauth/token
-  code         5 min   the one-time authorization code: a short random value; its details
-                       (user, app, PKCE challenge) stay in this server's memory, used once
+Tokens are signed JWTs (JWT_SECRET_KEY), so a backend restart doesn't sign anyone out:
+  mcp_access     1 day   sub=user, aud=<this server's connector address>, cid=<chat app's client id>
+  mcp_refresh    30 days same, used only at /oauth/token
+  code           5 min   the one-time authorization code: a short random value; its details
+                         (user, app, PKCE challenge) are in the database (hash only), used once
+  guest_checkout 2 h     a guest's capability for ONE guest checkout (no account)
 
 McpSignIn guards /mcp: a call to a customer tool without a valid token gets HTTP 401 with
 WWW-Authenticate pointing at the protected-resource metadata, which is how the chat app
@@ -37,8 +38,6 @@ CODE_TTL = 300
 # the cart (a visitor cart until the shopper signs in, which they do at checkout).
 CUSTOMER_TOOLS = {"my_shopsphere_account", "checkout", "update_checkout_choices", "approve_and_pay", "start_new_card_payment",
                   "finish_new_card_payment", "my_orders"}
-
-_codes: dict[str, tuple[float, dict]] = {}   # code -> (expiry, details): each code works once
 
 # Temporary sign-in diagnostics (GET /oauth/debug/recent): the last steps of chat-app sign-ins,
 # with no personal data: no emails, passwords, codes or tokens.
@@ -105,20 +104,41 @@ def _read(token: str, typ: str, audience=None) -> Optional[dict]:
     return claims if claims.get("typ") == typ else None
 
 
+def _code_hash(code: str) -> str:
+    import hashlib
+    return hashlib.sha256((code or "").encode()).hexdigest()
+
+
 def issue_code(**claims) -> str:
-    """A short one-time code for the redirect back to the chat app (some apps reject long ones)."""
+    """A short one-time code for the redirect back to the chat app. Its details live in the
+    database (only the code's hash is stored), so whichever server worker receives the token
+    request can redeem it: an in-memory code was lost when another worker answered."""
+    from backend.db.schema import OAuthCode
+    from backend.db.session_utils import get_session
     now = time.time()
-    for c in [c for c, (exp, _) in _codes.items() if exp < now]:
-        del _codes[c]
     code = secrets.token_urlsafe(32)
-    _codes[code] = (now + CODE_TTL, dict(claims))
+    with get_session() as db:
+        db.query(OAuthCode).filter(OAuthCode.expires_at < now).delete()
+        db.add(OAuthCode(code_hash=_code_hash(code), claims_json=json.dumps(claims), expires_at=now + CODE_TTL))
+        db.commit()
     return code
 
 
 def redeem_code(code: str) -> Optional[dict]:
-    """The code's details, once. A second use, an unknown or an expired code gives None."""
-    exp, claims = _codes.pop(code or "", (0.0, None))
-    return claims if claims and exp >= time.time() else None
+    """The code's details, once. A second use, an unknown or an expired code gives None. The
+    row is deleted in the same statement that claims it, so two concurrent uses can't both win."""
+    from backend.db.schema import OAuthCode
+    from backend.db.session_utils import get_session
+    if not code or len(code) > 200:
+        return None
+    with get_session() as db:
+        row = db.query(OAuthCode).filter_by(code_hash=_code_hash(code)).first()
+        if row is None:
+            return None
+        claims, exp = json.loads(row.claims_json), row.expires_at
+        claimed = db.query(OAuthCode).filter_by(code_hash=row.code_hash).delete()
+        db.commit()
+    return claims if claimed == 1 and exp >= time.time() else None
 
 
 def issue_tokens(user_id: str, client_id: str, resource: str) -> dict:
@@ -190,6 +210,24 @@ def read_visitor_cart(cart_id: Optional[str]) -> Optional[str]:
     if not m or not hmac.compare_digest(visitor_cart_id(m.group(1)), cart_id.strip()):
         return None
     return m.group(1)
+
+
+# Guest checkout (no account, no sign-in): a signed, short-lived token that names ONE guest
+# checkout and the anonymous visitor who owns it. Knowing a checkout id alone reaches nothing;
+# the token is checked on every guest call and the checkout must still belong to that visitor.
+GUEST_TTL = 2 * 3600
+
+
+def issue_guest_token(visitor_id: str, checkout_id: str) -> str:
+    return _issue("guest_checkout", GUEST_TTL, sub=visitor_id, chk=checkout_id)
+
+
+def read_guest_token(token: Optional[str]) -> Optional[tuple[str, str]]:
+    """(visitor id, checkout id) from a valid, unexpired guest token, else None."""
+    claims = _read((token or "").strip(), "guest_checkout") if token and len(token) < 1000 else None
+    if not claims or not str(claims.get("sub", "")).startswith("VIS") or not claims.get("chk"):
+        return None
+    return claims["sub"], claims["chk"]
 
 
 class McpSignIn:

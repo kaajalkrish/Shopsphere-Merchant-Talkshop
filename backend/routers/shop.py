@@ -26,7 +26,7 @@ for the current chat UI until Demo 1 Phase 5 replaces it.
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -343,24 +343,29 @@ def guest_details(checkout_id: str, req: GuestDetailsRequest, user: CurrentUser 
 
 # ── Track Order (Phase 10): Order ID + email, for guests and customers ─────────
 
-def _tracked(db: Session, req: TrackRequest):
-    order = order_service.find_for_tracking(db, req.order_id, req.email)
+def _tracked(db: Session, req: TrackRequest, request: Optional[Request] = None):
+    from backend.shop import ratelimit
+    caller = request.client.host if request is not None and request.client else None
+    allowed = ratelimit.allow_tracking(caller, req.order_id)
+    order = order_service.find_for_tracking(db, req.order_id, req.email) if allowed else None
     if order is None:
+        if allowed:
+            ratelimit.tracking_failed(req.order_id)
         return None, JSONResponse(status_code=404, content={"detail": {
             "code": "ORDER_NOT_FOUND", "message": order_service.NOT_FOUND}})
     return order, None
 
 
 @router.post("/api/orders/track")
-def track_order(req: TrackRequest, db: Session = Depends(get_db)):
-    order, err = _tracked(db, req)
+def track_order(req: TrackRequest, request: Request, db: Session = Depends(get_db)):
+    order, err = _tracked(db, req, request)
     return err or order_service.tracking_view(db, order)
 
 
 @router.post("/api/orders/track/email")
-def track_order_email(req: TrackRequest, db: Session = Depends(get_db)):
+def track_order_email(req: TrackRequest, request: Request, db: Session = Depends(get_db)):
     """The order's confirmation email from the demo outbox (same Order ID + email check)."""
-    order, err = _tracked(db, req)
+    order, err = _tracked(db, req, request)
     if err:
         return err
     return notifications.confirmation_for(db, order) or JSONResponse(status_code=404, content={"detail": {
@@ -368,9 +373,9 @@ def track_order_email(req: TrackRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/api/orders/track/advance")
-def track_order_advance(req: TrackRequest, db: Session = Depends(get_db)):
+def track_order_advance(req: TrackRequest, request: Request, db: Session = Depends(get_db)):
     """Demo control: move the simulated shipment to its next step."""
-    order, err = _tracked(db, req)
+    order, err = _tracked(db, req, request)
     if err:
         return err
     shipping.advance(db, order)

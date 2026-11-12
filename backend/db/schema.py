@@ -708,3 +708,14 @@ class SimScenario(Base):
     outcome = Column(String(20), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
+
+
+class OAuthCode(Base):
+    """One-time OAuth authorization codes for the chat-app connector (5 minutes, used once).
+    Kept in the database, not one server process's memory, so the code exchange works whichever
+    worker answers it. Only a SHA-256 hash of the code is stored."""
+    __tablename__ = "oauth_codes"
+
+    code_hash = Column(String(64), primary_key=True)
+    claims_json = Column(Text, nullable=False)        # user, app, return address, PKCE challenge, resource
+    expires_at = Column(Float, nullable=False)        # unix time

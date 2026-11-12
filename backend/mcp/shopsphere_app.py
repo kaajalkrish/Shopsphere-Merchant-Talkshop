@@ -1,13 +1,19 @@
 """
 ShopSphere for ChatGPT / Claude — the public MCP server (Streamable HTTP at /mcp).
 
-Step 1: read-only product discovery, no sign-in. The tools reuse Talkshop's own
-catalog search (backend/talkshop/tools.py), so a chat app gets the same products,
-prices, sizes and stock as the Talkshop panel on the website.
+Search, cart, checkout and payment as interactive cards, reusing Talkshop's catalog search
+(backend/talkshop/tools.py) and the shared shop services, so a chat app gets the same products,
+prices, stock, totals and payment controls as the website.
+
+Who can do what:
+  open             search, product details, the visitor cart, guest checkout, track_order
+  guest token      update_guest_checkout, start_guest_payment, finish_guest_payment (one guest
+                   checkout, no account; backend/shop/guest_checkout.py)
+  signed in        checkout, saved details, approve_and_pay, new-card payment, my_orders (OAuth)
+Payment tools are app-only (card buttons): the model can prepare a checkout, never pay.
 
 Deliberately separate from backend/mcp/server.py: that internal server has
 user-scoped tools (create_checkout with a default user) that must never be public.
-Nothing here reads or changes a cart, an order or a customer.
 """
 import base64
 import json
@@ -26,8 +32,8 @@ from mcp.types import TextContent
 from prefab_ui.actions import OpenLink, SendMessage, SetState, ShowToast
 from prefab_ui.actions.mcp import CallTool
 from prefab_ui.app import PrefabApp
-from prefab_ui.components import (Button, Card, CardContent, CardFooter, Column, Grid, H3, Image, Muted, Row,
-                                  Select, SelectOption, Separator, Text)
+from prefab_ui.components import (Button, Card, CardContent, CardFooter, Column, Grid, H3, Image, Input, Muted,
+                                  Row, Select, SelectOption, Separator, Text)
 from prefab_ui.components.control_flow import If
 from prefab_ui.rx import ERROR, RESULT, STATE
 from sqlalchemy.orm import Session
@@ -36,8 +42,10 @@ from backend.db.init_db import CATALOG_IMAGE_DIR, get_engine
 from backend.db.schema import User
 from backend.routers import auth as account
 from backend.mcp.auth import current_customer, optional_customer, read_visitor_cart, visitor_cart_id
-from backend.shop import card_approval, payment_routing, profile
+from backend.shop import card_approval, notifications, payment_routing, profile, ratelimit
 from backend.shop import cart as cart_service
+from backend.shop import guest_checkout as guest_service
+from backend.shop import orders as order_service
 from backend.shop import checkout as checkout_service
 from backend.shop import payment as payment_service
 from backend.shop.cart import CartError
@@ -68,12 +76,23 @@ ShopSphere first, always:
 3. Never invent ShopSphere products, prices, sizes or stock: use only what the tools return.
    get_shopsphere_product gives details or checks another size or colour.
 
-Buying. The cart needs no sign-in; checkout does (the connector asks the shopper to sign in or
-create an account then, and the cart comes with them):
+Buying. The cart needs no sign-in. At checkout the shopper chooses how to buy:
 4. When the shopper picks something ("add the black one in size 10"), call add_to_cart with the
    product_id, size and colour; ask for whatever is missing. They can also tap Add to cart on a card.
    Before sign-in, results carry a visitor_cart id: pass that same visitor_cart to every later
-   search_shopsphere, add_to_cart, show_cart and checkout call in this chat, so it stays one cart.
+   search_shopsphere, add_to_cart, show_cart, checkout and guest_checkout call in this chat, so
+   it stays one cart.
+4a. A shopper who isn't signed in has three choices at checkout (the cart card shows them):
+   sign in to their ShopSphere account, create a new account, or check out as a guest.
+   - Sign in or create an account: call checkout with visitor_cart. The connector opens
+     ShopSphere's sign-in page, which also has "Create an account"; the cart comes along.
+   - Guest: call guest_checkout with visitor_cart. No account and no sign-in. The guest types
+     their name, email and shipping address ON the guest checkout card (never ask for them in the
+     chat), then pays with a new card on the secure payment page. If they say they finished
+     paying there, call finish_guest_payment with the guest_token.
+   If the shopper hasn't said which, ask which they prefer; don't pick for them.
+4b. Order tracking: signed-in customers use my_orders. Anyone (guests too) can track with
+   track_order: ask for the Order ID and the email used at checkout.
 5. show_cart shows the cart card; checkout shows the review card with Chase offers, points,
    delivery, tax, total, address and saved card. Pass delivery="express" or use_points=true when
    asked.
@@ -466,8 +485,9 @@ def add_to_cart(product_id: str, size: Optional[str] = None, color: Optional[str
            "cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"],
            "next_step": "Offer show_cart or checkout. Nothing has been charged."}
     if cart_id:
-        out.update(visitor_cart=cart_id, next_step=out["next_step"] + " Pass visitor_cart to show_cart and "
-                   "checkout; the shopper signs in (or creates an account) at checkout and the cart comes along.")
+        out.update(visitor_cart=cart_id, next_step=out["next_step"] + " Pass visitor_cart to show_cart, "
+                   "checkout and guest_checkout. At checkout the shopper signs in, creates an account (the cart "
+                   "comes along) or checks out as a guest.")
     return out
 
 
@@ -522,9 +542,18 @@ def _cart_view(cart: dict, cart_id: Optional[str] = None) -> tuple[Column, dict]
             Muted(f"Subtotal when shown: {_money(cart['subtotal'])}. Offers, points, delivery and tax are "
                   "added at checkout.")
             if cart_id:
-                Muted("You'll sign in or create a ShopSphere account at checkout. Your cart comes with you.")
-            Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."
-                                                    + (f" (visitor_cart {cart_id})" if cart_id else "")))
+                Text("How would you like to check out?", css_class="font-medium")
+                Muted("Sign in to your ShopSphere account, create one (your cart comes with you), or check "
+                      "out as a guest with no account.")
+                with Row(gap=2, css_class="flex-wrap"):
+                    Button("Sign in & check out", on_click=SendMessage(
+                        f"Sign in to ShopSphere and check out my cart (visitor_cart {cart_id})."))
+                    Button("Create account & check out", variant="outline", on_click=SendMessage(
+                        f"Create a ShopSphere account and check out my cart (visitor_cart {cart_id})."))
+                    Button("Check out as guest", variant="secondary", on_click=SendMessage(
+                        f"Check out my ShopSphere cart as a guest (visitor_cart {cart_id})."))
+            else:
+                Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."))
     return view, state
 
 
@@ -539,7 +568,8 @@ def show_cart(visitor_cart: Optional[str] = None) -> ToolResult:
                                              "line_total", "in_stock")} for ln in cart["lines"]],
             "item_count": cart["item_count"], "subtotal": cart["subtotal"],
             "next_step": "To buy, call checkout (optionally with line_ids)"
-                         + (", passing visitor_cart; the shopper signs in or creates an account then." if cart_id
+                         + (", passing visitor_cart: the shopper signs in or creates an account then. Or, if "
+                            "they choose to check out as a guest, call guest_checkout with visitor_cart." if cart_id
                             else ".")}
     if cart_id:
         data["visitor_cart"] = cart_id
@@ -855,16 +885,41 @@ async def start_new_card_payment(checkout_id: str, checkout_version: int, final_
     the card is typed. Returns that page's address. The model can't call this."""
     user = current_customer()
     with Session(get_engine()) as db:
-        co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+        try:
+            co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
         if co.pay_with != "provider":
             raise ToolError("Choose \"a new card\" on the checkout card first.")
+    return await _open_secure_page(user, checkout_id, checkout_version, final_amount, currency)
+
+
+async def _open_secure_page(user, checkout_id: str, checkout_version: int, final_amount: float, currency: str,
+                            guest: bool = False) -> dict:
+    """The shopper's Approve & pay for a new card: their consent scoped to this exact order
+    (version, amount, currency), then a session on the secure payment provider's page. Tapped
+    again while a page is open: the same page if it's still waiting, otherwise (it expired, was
+    cancelled or declined) a fresh one for the same approved order. Nothing is charged here."""
+    scope = {"action": "PAY", "checkout_version": int(checkout_version), "final_amount": float(final_amount),
+             "currency": currency}
     try:
-        res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button", action="PAY",
-                                            checkout_version=int(checkout_version), final_amount=float(final_amount),
-                                            currency=currency)
+        try:
+            res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button",
+                                                guest=guest, **scope)
+        except CheckoutError as exc:
+            if exc.code != "PAYMENT_IN_PROGRESS" or not exc.detail.get("payment_session_id"):
+                raise
+            now = await payment_service.complete_provider(user, checkout_id, exc.detail["payment_session_id"],
+                                                          guest=guest)
+            if now.get("status") == "pending":                         # still open: reuse that page
+                return {"status": "provider_handoff", "hosted_url": now["hosted_url"],
+                        "payment_session_id": now["payment_session_id"]}
+            if now.get("status") == "authorized":
+                raise ToolError(f"This order is already paid: {(now.get('order') or {}).get('order_id')}. "
+                                "Tap \"I've finished paying\".")
+            res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button",
+                                                guest=guest, **scope)
     except CheckoutError as exc:
-        if exc.code == "PAYMENT_IN_PROGRESS" and exc.detail.get("hosted_url"):
-            return {"status": "provider_handoff", **exc.detail}       # the page is already open: reuse it
         raise ToolError(exc.message)
     if res.get("status") != "provider_handoff":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
@@ -897,9 +952,277 @@ async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional
             "arrives": order.get("delivery_date"), "email": res.get("confirmation_email")}
 
 
+# ── Guest checkout: no account, no sign-in ─────────────────────────────────────
+
+def _mask_email(email: Optional[str]) -> str:
+    name, _, domain = (email or "").partition("@")
+    return f"{name[:1]}***@{domain}" if domain else ""
+
+
+def _guest_state(co: dict) -> dict:
+    """The guest checkout card's values. Contact details come back masked (the card shows the
+    city, state and ZIP; the email as r***@example.com), so they aren't repeated to the model."""
+    dl = co.get("delivery") or {}
+    chosen = next((o for o in dl.get("options", []) if o["method"] == dl.get("method")), {})
+    addr, guest = co.get("address") or {}, co.get("guest") or {}
+    has_details = bool(guest.get("email") and addr)
+    codes = {i.get("code") for i in co.get("issues") or []}
+    problems = [i for i in co.get("issues") or [] if not (i.get("code") == "NO_ADDRESS" and "NO_GUEST_DETAILS" in codes)]
+    return {
+        "checkout_id": co["checkout_id"], "version": co["checkout_version"], "total": co["total"],
+        "currency": co.get("currency") or "USD", "total_text": _money(co["total"]),
+        "subtotal_text": _money(co["subtotal"]), "tax_text": _money(co.get("tax")),
+        "delivery_label": f"Delivery: {chosen.get('label', 'Standard')}, arrives {dl.get('date')}",
+        "shipping_text": _money(co.get("shipping")), "arrives": dl.get("date"),
+        "has_details": has_details,
+        "ship_to": (f"Ship to: {addr.get('full_name') or guest.get('name') or ''}, {addr.get('city')}, "
+                    f"{addr.get('state')} {addr.get('postal_code')}" if has_details
+                    else "Ship to: add your details below"),
+        "contact": f"Confirmation email to: {_mask_email(guest.get('email'))}" if guest.get("email") else "",
+        "payable": bool(co.get("ready")) and (co.get("payment_path") or {}).get("route") == "provider_handoff",
+        "problem": " ".join(i.get("message") or f"{i.get('name') or 'Item'}: {i.get('code')}" for i in problems),
+    }
+
+
+_GUEST_REFRESHED = ("version", "total", "total_text", "subtotal_text", "tax_text", "delivery_label", "shipping_text",
+                    "arrives", "has_details", "ship_to", "contact", "payable", "problem")
+_GUEST_FIELDS = {"g_name": "full_name", "g_email": "email", "g_line1": "line1", "g_line2": "line2",
+                 "g_city": "city", "g_state": "state", "g_zip": "postal_code"}
+
+
+def _guest_view(co: dict, token: str) -> tuple[Column, dict]:
+    """Guest checkout card: items and totals, the guest's own details form (typed here, sent
+    straight to ShopSphere), delivery, then Approve & pay -> secure payment page -> confirmation."""
+    st = _guest_state(co)
+    dl = co.get("delivery") or {}
+    state = {**st, "paid": False, "order_ref": "", "handing_off": False, "hosted_url": "", "session_id": "",
+             "sent_to": "", "email_note": "", "delivery": dl.get("method") or "standard",
+             **{k: "" for k in _GUEST_FIELDS}}
+    S = STATE
+    with Column(gap=3) as view:
+        H3("Guest checkout at ShopSphere")
+        Muted("No account needed. Your details are used for this order only.")
+        with Card():
+            with CardContent(), Column(gap=2):
+                for ln in co["lines"]:
+                    with Row(gap=2, css_class="justify-between"):
+                        Text(f"{ln['name']} ({_variant_label(ln.get('size'), ln.get('color'))}) × {ln['quantity']}")
+                        Text(_money(ln["unit_price"] * ln["quantity"]))
+                Separator()
+                for label, key in (("Subtotal", "subtotal_text"), (None, "shipping_text"), ("Tax", "tax_text")):
+                    with Row(gap=2, css_class="justify-between"):
+                        Muted(label if label else f"{S.delivery_label}")
+                        Muted(f"{getattr(S, key)}")
+                with Row(gap=2, css_class="justify-between"):
+                    Text("Total", css_class="font-semibold")
+                    Text(f"{S.total_text}", css_class="font-semibold")
+                Muted(f"{S.ship_to}")
+                with If(S.contact):
+                    Muted(f"{S.contact}")
+                Muted("Pay with: a new card on the secure payment page (used once, not saved)")
+                with If(~S.paid):
+                    Separator()
+                    Text("Your details", css_class="font-medium")
+                    with Grid(columns={"default": 1, "sm": 2}, gap=2):
+                        Input(name="g_name", placeholder="Full name", max_length=80, aria_label="Full name")
+                        Input(name="g_email", input_type="email", placeholder="Email (for your confirmation)",
+                              max_length=255, aria_label="Email")
+                        Input(name="g_line1", placeholder="Street address", max_length=120, aria_label="Street address")
+                        Input(name="g_line2", placeholder="Apt, suite (optional)", max_length=120,
+                              aria_label="Apartment or suite")
+                        Input(name="g_city", placeholder="City", max_length=80, aria_label="City")
+                        Input(name="g_state", placeholder="State, e.g. TX", max_length=2, aria_label="State")
+                        Input(name="g_zip", placeholder="ZIP code", max_length=10, aria_label="ZIP code")
+                        with Select(name="delivery", value=state["delivery"], size="sm"):
+                            for o in dl.get("options") or []:
+                                SelectOption(value=o["method"], label=f"{o['label']} delivery, arrives {o['date']}"
+                                             + (f" (+{_money(o['price'])})" if o.get("price") else " (free)"))
+                    Button("Save details & update total", variant="outline", size="sm", on_click=CallTool(
+                        "update_guest_checkout", arguments={
+                            "guest_token": token, "delivery": S.delivery,
+                            **{arg: getattr(S, k) for k, arg in _GUEST_FIELDS.items()}},
+                        onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _GUEST_REFRESHED),
+                                   ShowToast("Details saved", variant="success")],
+                        onError=_failed_toast("Please check your details")))
+                    Muted("Your name, email and address go straight to ShopSphere for this order; no account is "
+                          "created. Card details go only on the secure payment page, never in the chat.")
+            with CardFooter(), Column(gap=2):
+                with If(~S.payable), If(~S.paid):
+                    Muted(f"{S.problem}")
+                with If(S.payable), If(~S.paid):
+                    with If(~S.handing_off):
+                        Button(f"Approve & pay {S.total_text}", on_click=CallTool(
+                            "start_guest_payment", arguments={
+                                "guest_token": token, "checkout_version": S.version, "final_amount": S.total,
+                                "currency": state["currency"]},
+                            onSuccess=[SetState("hosted_url", RESULT.hosted_url),
+                                       SetState("session_id", RESULT.payment_session_id),
+                                       SetState("handing_off", True), OpenLink(RESULT.hosted_url)],
+                            onError=_failed_toast("Couldn't open the secure payment page")))
+                        Muted("Next you enter your card on the secure payment page (simulated provider, test cards "
+                              "only). Claude never sees it. Nothing is charged until you finish there.")
+                    with If(S.handing_off):
+                        Text("Finish on the secure payment page", css_class="font-medium")
+                        Muted("It opened in a new browser tab. Enter the card there, then come back here.")
+                        with Row(gap=2):
+                            Button("Open secure payment page", variant="outline", on_click=OpenLink(S.hosted_url))
+                            Button("I've finished paying", variant="success", on_click=CallTool(
+                                "finish_guest_payment", arguments={"guest_token": token,
+                                                                   "payment_session_id": S.session_id},
+                                onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
+                                           SetState("sent_to", RESULT.sent_to), SetState("arrives", RESULT.arrives),
+                                           SetState("email_note", RESULT.email_note),
+                                           ShowToast("Payment approved", variant="success")],
+                                onError=_failed_toast("Not finished yet")))
+                with If(S.paid):
+                    Text("✓ Your ShopSphere order has been placed", css_class="font-semibold")
+                    Text(f"Order ID: {S.order_ref}", css_class="font-medium")
+                    Muted(f"Confirmation sent to: {S.sent_to}")
+                    Muted(f"Estimated delivery: {S.arrives}")
+                    Muted(f"{S.email_note}")
+                    Muted("You can track your order using your Order ID and email address.")
+                    Button("Track my order", variant="outline", size="sm",
+                           on_click=SendMessage(f"Track my ShopSphere order {S.order_ref}."))
+    return view, state
+
+
+def _guest(token: Optional[str]):
+    with Session(get_engine()) as db:
+        try:
+            return guest_service.load(db, token)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+
+
+@cards.ui(annotations=WRITE)
+def guest_checkout(visitor_cart: str, line_ids: Optional[list[str]] = None,
+                   delivery: Optional[str] = None) -> ToolResult:
+    """Check out this chat's ShopSphere cart as a GUEST: no account and no sign-in. Use it when the
+    shopper chooses "check out as guest". Shows the guest checkout card, where the shopper types
+    their name, email and shipping address themselves (don't ask for them in the chat), picks
+    delivery, taps Approve & pay and pays with a new card on the secure payment page. Nothing is
+    charged by this call. Guests don't get points, the Wallet or Chase offers.
+
+    Args:
+        visitor_cart: the visitor_cart id from earlier results in this chat (required).
+        line_ids: optional cart line ids to buy (from show_cart); default: the whole cart.
+        delivery: optional "standard" or "express".
+    """
+    if optional_customer():
+        raise ToolError("You're signed in to ShopSphere, so use checkout: your saved details apply.")
+    vid = read_visitor_cart(visitor_cart)
+    if not vid:
+        raise ToolError("I couldn't find this chat's cart. Show the cart (or add the items) first.")
+    with Session(get_engine()) as db:
+        try:
+            co, token = guest_service.start(db, vid, line_ids, delivery)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+    view, state = _guest_view(co, token)
+    data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "shipping", "tax", "total",
+                                   "currency")}
+    data.update({"guest_token": token, "guest": True,
+                 "items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"),
+                            "quantity": ln["quantity"]} for ln in co["lines"]],
+                 "delivery": (co.get("delivery") or {}).get("method"), "arrives": (co.get("delivery") or {}).get("date"),
+                 "ready": False,
+                 "next_step": "The guest types name, email and shipping address on this card (never ask for them in "
+                              "the chat), then taps Approve & pay and enters a new card on the secure payment page. "
+                              "If they say they finished there, call finish_guest_payment with guest_token. Never say "
+                              "the order is paid unless that returns an order_id."})
+    return _ui(view, state, data)
+
+
+@cards.tool()
+def update_guest_checkout(guest_token: str, delivery: Optional[str] = None, full_name: str = "", email: str = "",
+                          line1: str = "", line2: str = "", city: str = "", state: str = "",
+                          postal_code: str = "") -> dict:
+    """App-only (guest checkout card): save the guest's own contact + shipping details and/or the
+    delivery choice. ShopSphere validates them and recalculates the total."""
+    details = {"full_name": full_name, "email": email, "line1": line1, "line2": line2 or None, "city": city,
+               "state": state, "postal_code": postal_code}
+    typed = any(str(v or "").strip() for v in details.values())
+    with Session(get_engine()) as db:
+        try:
+            co = guest_service.update(db, guest_token, delivery=delivery if delivery in ("standard", "express") else None,
+                                      details={k: str(v or "")[:255] if v is not None else None
+                                               for k, v in details.items()} if typed else None)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+    return _guest_state(co)
+
+
+@cards.tool()
+async def start_guest_payment(guest_token: str, checkout_version: int, final_amount: float,
+                              currency: str = "USD") -> dict:
+    """App-only: the guest tapped Approve & pay. Records their consent for this exact order
+    (version, amount, currency) and opens the secure payment provider's page, where they type a
+    new card (used once, never saved). The model can't call this."""
+    user, checkout_id = _guest(guest_token)
+    return await _open_secure_page(user, checkout_id, checkout_version, final_amount, currency, guest=True)
+
+
+@cards.tool(model=True)
+async def finish_guest_payment(guest_token: str, payment_session_id: Optional[str] = None) -> dict:
+    """After the guest finished on the secure payment page: ShopSphere asks the payment provider
+    itself for the result and, if the card was verified, places the guest order (once) and emails
+    the confirmation. Call it when the guest says they finished paying there. Nothing is charged
+    unless they completed that page."""
+    from backend.db.schema import Order
+    user, checkout_id = _guest(guest_token)
+    if not payment_session_id:
+        with Session(get_engine()) as db:
+            payment_session_id = checkout_service.get_checkout(db, user.user_id, checkout_id).provider_session_id
+        if not payment_session_id:
+            raise ToolError("There's no open secure payment for this order. Tap Approve & pay on the checkout card.")
+    try:
+        res = await payment_service.complete_provider(user, checkout_id, payment_session_id[:80], guest=True)
+    except CheckoutError as exc:
+        raise ToolError(exc.message)
+    if res.get("status") == "pending":
+        raise ToolError("The secure payment page isn't finished yet. Enter the card there, then tap "
+                        "\"I've finished paying\" again.")
+    if res.get("status") != "authorized":
+        raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
+    order = res.get("order") or {}
+    with Session(get_engine()) as db:
+        row = db.query(Order).filter_by(order_id=order.get("internal_order_id")).first()
+        mail = (notifications.confirmation_for(db, row) if row else None) or {}
+    delivery = mail.get("delivery")
+    note = {"sending": "The confirmation email is on its way.",
+            "sent": "The confirmation email was sent.",
+            "failed": "We couldn't send the confirmation email; your order is placed. Track it with your Order ID.",
+            }.get(delivery, "Email sending isn't set up on this server, so the confirmation is kept in "
+                            "ShopSphere's demo outbox (not delivered).")
+    return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
+            "arrives": order.get("delivery_date"), "guest": True, "sent_to": _mask_email(mail.get("to")),
+            "email_delivery": delivery or "none", "email_note": note,
+            "next_step": "Tell the guest their Order ID, the estimated delivery and that they can track it with "
+                         "track_order (Order ID + the email they used)."}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def track_order(order_id: str, email: str) -> dict:
+    """Track any ShopSphere order (guest or customer) with its Order ID (e.g. SS-12345) and the
+    email address used at checkout. No sign-in needed. Ask the shopper for both if missing. Shows
+    status, shipment, estimated delivery and tracking; never the full address or card."""
+    from fastmcp.server.dependencies import get_http_headers
+    headers = get_http_headers(include_all=True)
+    caller = (headers.get("x-forwarded-for") or "").split(",")[0].strip() or "mcp"
+    order_id, email = (order_id or "")[:20], (email or "")[:255]
+    if ratelimit.allow_tracking(caller, order_id):
+        with Session(get_engine()) as db:
+            order = order_service.find_for_tracking(db, order_id, email)
+            if order is not None:
+                return {"found": True, "order": order_service.tracking_view(db, order)}
+        ratelimit.tracking_failed(order_id)
+    return {"found": False, "message": order_service.NOT_FOUND}      # the same answer for every failure
+
+
 @mcp.tool(annotations=READ_ONLY)
 def my_orders(order_id: Optional[str] = None) -> dict:
-    """The signed-in shopper's recent ShopSphere orders with status and tracking (or one order)."""
+    """The signed-in shopper's recent ShopSphere orders with status and tracking (or one order).
+    Guests (no account) use track_order with their Order ID and email instead."""
     user = current_customer()
     if order_id:
         one = talkshop_tools.own_order(user.user_id, order_id)

@@ -184,3 +184,11 @@ def card_approval(client, headers: dict, checkout_id: str, verified: bool = True
 def member_headers() -> dict:
     """A Chase Visa credit-card holder (Chase benefits), no saved payment card."""
     return register_member()[0]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tracking_limits():
+    """Order-tracking rate limits are per process: every test starts with a clean count."""
+    from backend.shop import ratelimit
+    ratelimit.reset()
+    yield
