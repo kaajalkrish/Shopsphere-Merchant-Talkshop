@@ -230,6 +230,72 @@ def read_guest_token(token: Optional[str]) -> Optional[tuple[str, str]]:
     return claims["sub"], claims["chk"]
 
 
+# Purchase authorization (conversational checkout): review_order hands the shopper's assistant a
+# signed, 15-minute authorization REQUEST for one exact order: who, which checkout, its version,
+# fingerprint, total, currency and way to pay. place_order needs it back together with the
+# shopper's explicit yes; the server re-checks every field against the live checkout, so a
+# changed price, address, card or delivery voids it, and a paid checkout can't be paid again.
+PURCHASE_TTL = 15 * 60
+
+
+def issue_purchase_authorization(owner_id: str, checkout_id: str, version: int, total: float, currency: str,
+                                 checkout_hash: str, pay_with: str) -> str:
+    return _issue("purchase_auth", PURCHASE_TTL, sub=owner_id, chk=checkout_id, ver=int(version),
+                  amt=round(float(total) * 100), cur=currency, fp=(checkout_hash or "")[:16], pay=pay_with[:60])
+
+
+def read_purchase_authorization(token: Optional[str]) -> Optional[dict]:
+    if not token or len(token) > 1500:
+        return None
+    return _read(token.strip(), "purchase_auth")
+
+
+def _guest_checkout_ids(calls: list) -> bool:
+    """Every customer-tool call here names a GUEST checkout (by checkout_id): it must not be turned
+    into a sign-in. The tool itself then explains the guest way (checkout ids alone reach nothing)."""
+    ids = [((c.get("params") or {}).get("arguments") or {}).get("checkout_id") for c in calls
+           if isinstance(c, dict) and c.get("method") == "tools/call"
+           and (c.get("params") or {}).get("name") in CUSTOMER_TOOLS]
+    if not ids or not all(isinstance(i, str) and i.startswith("CHK_") for i in ids):
+        return False
+    from backend.db.schema import Checkout, User
+    from backend.db.session_utils import get_session
+    with get_session() as db:
+        for cid in ids:
+            co = db.query(Checkout).filter_by(checkout_id=cid[:40]).first()
+            owner = db.query(User).filter_by(user_id=co.user_id).first() if co else None
+            if not (owner and owner.is_guest):
+                return False
+    return True
+
+
+def _trace_discovery(methods: list, wanted: set, auth_user: Optional[str], calls: list, challenged: bool) -> None:
+    """Connector discovery, sign-in challenges and token checks, as they happen (see protocol_trace)."""
+    from backend.observability import protocol_trace as pt
+    if auth_user:
+        target = pt.trace_id_for(auth_user)
+    else:
+        carts = [((c.get("params") or {}).get("arguments") or {}).get("visitor_cart") for c in calls
+                 if isinstance(c, dict)]
+        vid = next((read_visitor_cart(x) for x in carts if read_visitor_cart(x)), None)
+        target = pt.trace_id_for(vid) if vid else pt.CONNECTOR_TRACE
+    for m in methods:
+        if m in ("initialize", "tools/list"):
+            pt.record(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, f"{m} (connector discovery)", trace_id=target,
+                      request="Claude connects to the ShopSphere connector" if m == "initialize" else
+                      "Claude asks which tools the merchant offers",
+                      response="Server info + instructions" if m == "initialize" else "Tool list with schemas",
+                      status="success")
+    if auth_user and wanted & CUSTOMER_TOOLS:
+        pt.record(pt.MCP_SERVER, "ShopSphere OAuth server", pt.OAUTH, "Bearer token verified", trace_id=target,
+                  request=f"tools/call {', '.join(sorted(wanted & CUSTOMER_TOOLS))}",
+                  response="Signed access token valid for this connector address (audience checked)")
+    if challenged:
+        pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.OAUTH, "Sign-in required (HTTP 401 challenge)", trace_id=target,
+                  request=f"tools/call {', '.join(sorted(t for t in wanted if t))} without a valid token",
+                  response="401 + WWW-Authenticate → Claude opens ShopSphere's sign-in page", status="pending")
+
+
 class McpSignIn:
     """ASGI guard in front of the MCP app: customer tools need a valid ShopSphere token."""
 
@@ -264,9 +330,10 @@ class McpSignIn:
         if auth and not valid:
             claims = _read(auth[7:].strip(), "mcp_access") if auth.lower().startswith("bearer ") else None
             why = "unreadable or expired" if not claims else f"aud={claims.get('aud')}"
-            if needs_customer:                       # a customer tool: sign in (or refresh) first
+            if needs_customer and not _guest_checkout_ids(calls):   # a customer tool: sign in (or refresh)
                 log_signin("mcp_401_bad_token", path=path, methods=methods, tools=sorted(t for t in wanted if t),
                            token=why, expected=resource_url(base, path))
+                _safe_trace(methods, wanted, None, calls, True)
                 return await _challenge(send, base, path)
             # Public work (search, cart, guest checkout, tracking): an expired or wrong token must not
             # turn into a sign-in pop-up. The call goes on as an anonymous visitor, with the token
@@ -277,10 +344,16 @@ class McpSignIn:
                                           if k.decode("latin-1").lower() != "authorization"]}
             auth = None
         if needs_customer and not auth:
-            log_signin("mcp_401_needs_sign_in", path=path, tools=sorted(t for t in wanted if t))
-            return await _challenge(send, base, path)
+            # A guest's checkout must never be routed into the customer sign-in: when the call
+            # names a guest checkout, it goes on and the tool answers with the guest way to do it.
+            if not _guest_checkout_ids(calls):
+                log_signin("mcp_401_needs_sign_in", path=path, tools=sorted(t for t in wanted if t))
+                _safe_trace(methods, wanted, None, calls, True)
+                return await _challenge(send, base, path)
+            log_signin("mcp_guest_checkout_not_challenged", path=path, tools=sorted(t for t in wanted if t))
         if auth and ("initialize" in methods or "tools/list" in methods):
             log_signin("mcp_signed_in_call", path=path, methods=methods)
+        _safe_trace(methods, wanted, user_for(auth, base, resource_url(base, path)) if auth else None, calls, False)
 
         sent = False
 
@@ -293,6 +366,13 @@ class McpSignIn:
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
         return await self.app(scope, replay, send)
+
+
+def _safe_trace(*args) -> None:
+    try:
+        _trace_discovery(*args)
+    except Exception as exc:                          # the trace never blocks a call
+        print(f"[trace] discovery not recorded: {type(exc).__name__}", flush=True)
 
 
 async def _challenge(send, base: str, path: str = "/mcp") -> None:

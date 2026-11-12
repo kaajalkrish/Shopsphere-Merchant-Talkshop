@@ -498,6 +498,27 @@ class LoyaltyTransaction(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class ProtocolEvent(Base):
+    """One step of the agent communication trace (backend/observability/protocol_trace.py):
+    a real MCP call, an in-process service call or a simulated payment step, as it ran.
+    Summaries only: never tokens, full card numbers, CVC, full emails or street addresses."""
+    __tablename__ = "protocol_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trace_id = Column(String(40), nullable=False, index=True)
+    at = Column(Float, nullable=False)                   # unix time, sub-second
+    source = Column(String(80), nullable=False)
+    destination = Column(String(80), nullable=False)
+    protocol = Column(String(80), nullable=False)        # the real transport: MCP JSON-RPC, HTTP, in-process call…
+    pattern = Column(String(80))                         # the design idea it follows, qualified ("AP2-style")
+    operation = Column(String(120), nullable=False)
+    request = Column(Text)
+    response = Column(Text)
+    status = Column(String(12), nullable=False)          # success | failure | pending | info
+    correlation = Column(String(60))                     # checkout / order reference
+    layer = Column(String(12), nullable=False, default="real")   # real | simulated
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

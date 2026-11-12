@@ -223,10 +223,10 @@ def test_case3_guest_buys_without_an_account_gets_an_email_and_tracks_the_order(
     monkeypatch.setattr(notifications, "_dispatch", lambda job: job())
     email = f"pat.{secrets.token_hex(4)}@guestmail.net"
     cart, co, raw = guest_start(client, ("SSP049", None, 2), ("SSP001", "10", 1))
-    card = json.dumps(raw["structuredContent"])
-    assert "update_guest_checkout" in card and "g_email" in card and "card_number" not in card
-    from tests.test_mcp_guest_card_ui import CardDriver
-    shown = CardDriver(client, raw["structuredContent"]).texts()
+    # Conversational: guest_checkout answers with data (no form card); the cart card's guest button
+    # still opens the in-card form (tests/test_mcp_guest_card_ui.py).
+    shown = json.dumps({k: v for k, v in co.items() if k != "next_step"})
+    assert "card_number" not in shown and co["saved_profile"]["available"]
     assert "Chase" not in shown and "points" not in shown.lower() and "Wallet" not in shown   # no account-only benefits
     early, _ = tool(client, "start_guest_payment", guest_token=co["guest_token"],
                     checkout_version=co["checkout_version"], final_amount=co["total"], currency="USD")
@@ -301,7 +301,8 @@ def test_case3_guest_sessions_are_isolated_and_payment_needs_the_shoppers_own_st
     # a customer token can't be used as a guest token, and guest payment tools are hidden from the model
     _, tools = rpc(client, "tools/list")
     vis = {t["name"]: t.get("_meta", {}).get("ui", {}).get("visibility") for t in tools["result"]["tools"]}
-    assert vis["start_guest_payment"] == ["app"] and vis["update_guest_checkout"] == ["app"]
+    assert vis["start_guest_payment"] == ["app"]
+    assert vis["update_guest_checkout"] == ["app", "model"]     # a guest may give their details in the chat
     assert vis["approve_and_pay"] == ["app"] and vis["start_new_card_payment"] == ["app"]
     # opening the secure page (even by a direct call) moves no money: only the shopper's card + verification there
     started = guest_pay(client, a, st_a)

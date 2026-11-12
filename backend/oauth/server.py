@@ -389,6 +389,17 @@ async def token(request: Request):
     return res
 
 
+def _trace_token(user_id: str, what: str, resource: str) -> None:
+    """The sign-in, in the customer's agent communication trace (no codes or tokens in it)."""
+    try:
+        from backend.observability import protocol_trace as pt
+        pt.record(pt.CLAUDE, "ShopSphere OAuth server", pt.OAUTH, what, trace_id=pt.trace_id_for(user_id),
+                  request="POST /oauth/token (grant_type=authorization_code)",
+                  response=f"Access token (1 day) + refresh token issued for {resource}")
+    except Exception:
+        pass
+
+
 def _token(form: dict, base: str):
     if form.get("resource") and not mcp_auth.is_our_resource(base, form["resource"].rstrip("/")):
         return _error(400, "invalid_target", "This server only issues tokens for its MCP endpoints.")
@@ -402,6 +413,7 @@ def _token(form: dict, base: str):
         if not _pkce_ok(form.get("code_verifier", ""), claims["cc"]):
             return _error(400, "invalid_grant", "PKCE verification failed.")
         resource = _resource(base, form.get("resource") or claims.get("res"))
+        _trace_token(claims["sub"], "Authorization code exchanged (PKCE S256 verified)", resource)
         return JSONResponse(mcp_auth.issue_tokens(claims["sub"], claims["cid"], resource),
                             headers={"Cache-Control": "no-store"})
     if grant == "refresh_token":

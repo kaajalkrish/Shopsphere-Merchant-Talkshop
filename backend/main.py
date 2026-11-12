@@ -15,6 +15,7 @@ from backend.db.config import DB_PATH
 from backend.mcp.shopsphere_app import mcp_http_app
 from backend.mcp.auth import McpSignIn
 from backend.oauth.server import router as oauth_router
+from backend.routers.trace import router as trace_router
 
 
 @asynccontextmanager
@@ -71,6 +72,7 @@ app.include_router(talkshop.router)
 app.include_router(member.router)
 app.include_router(vic.router)
 app.include_router(oauth_router)       # ShopSphere sign-in for the MCP connector (OAuth 2.1)
+app.include_router(trace_router)       # agent communication trace panel (/trace/<id>)
 
 # CH-6: in a one-process demo the mock gateway / Simulated Secure Payment Provider is
 # also reachable at /psp, so the customer's browser can open the provider's hosted page

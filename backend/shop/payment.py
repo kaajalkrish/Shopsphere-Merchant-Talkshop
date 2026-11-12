@@ -104,7 +104,9 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
 
     guest=True (the chat connector's guest checkout only, after it checked the guest's signed
     checkout token): an anonymous visitor's own guest checkout, paid ONLY with a new card on the
-    provider's page (one-time: never saved), with guest contact + shipping details present.
+    provider's page (one-time: never saved) or with a sandbox card token from the shopper's
+    authorized profile (backend/shop/guest_wallet.py: the same card-on-file route and simulated
+    cardholder approval as a saved card), with guest contact + shipping details present.
     Every other rule (scope, version, refresh, GreenLight, PayIt, single order) is the same.
     The website's routes never pass it, so they stay customer-only."""
     # Imported here: the routers import this module's callers.
@@ -120,12 +122,15 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
 
     with get_session() as db:
         from backend.shop import eligibility       # second line of defence (CH-2): a signed-in customer
-        if guest:                                   # … or a guest on their own guest checkout, new card only
+        if guest:                                   # … or a guest on their own guest checkout: a new card,
+            from backend.shop import guest_wallet    # or a sandbox card from their authorized profile
             co = checkout_service.get_checkout(db, user.user_id, checkout_id)
+            sandbox = co.pay_with == "card" and guest_wallet.is_sandbox_card(db, user.user_id, co.payment_method_id)
             if not (user.is_visitor and checkout_service.is_guest_owner(db, user.user_id)
-                    and co.pay_with == "provider"):
+                    and (co.pay_with == "provider" or sandbox)):
                 raise checkout_service.CheckoutError(
-                    "GUEST_NEW_CARD_ONLY", "Guest checkout is paid with a new card on the secure payment page.", 403)
+                    "GUEST_NEW_CARD_ONLY", "Guest checkout is paid with a new card on the secure payment page "
+                    "or a sandbox card from the shopper's authorized profile.", 403)
         else:
             code = eligibility.check_access(db, user)  # (any issuer) …
             if code:

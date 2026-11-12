@@ -213,8 +213,8 @@ def update_checkout(db: Session, user_id: str, checkout_id: str, *, delivery_met
         if pay_with not in ("card", "wallet", "provider"):
             raise CheckoutError("INVALID_PAYMENT", "Pay with a saved card, a new card through the secure payment "
                                                    "provider, or your ShopSphere Wallet.")
-        if pay_with == "provider" and is_guest_owner(db, user_id):
-            raise CheckoutError("LOGIN_REQUIRED", "Sign in to pay with a new card.", 403)
+        # (A guest pays with a new card on the provider's page or a sandbox card from their authorized
+        # profile, so "provider" is allowed for guests too: it used to answer LOGIN_REQUIRED here.)
         if pay_with == "wallet" and (is_guest_owner(db, user_id)
                                      or not db.query(Wallet).filter_by(user_id=user_id).first()):
             raise CheckoutError("WALLET_UNAVAILABLE", "The ShopSphere Wallet is for customers with an account.", 403)

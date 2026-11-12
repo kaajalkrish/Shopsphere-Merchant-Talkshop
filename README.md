@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v7` (also `/mcp`, `/shop`, `/shop/v6`; after new tools are added, connect at the next version, e.g. `/shop/v8`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v8` (also `/mcp`, `/shop`, `/shop/v7`; after new tools are added, connect at the next version, e.g. `/shop/v9`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
 The cards work by themselves: every button calls ShopSphere directly and the next step (cart, checkout, guest form,
@@ -80,13 +80,49 @@ read-only). Searching and the cart are open (a visitor cart per chat). At checko
    and Chase offers; the visitor cart is merged into the account's cart.
 2. **Create an account** on the same sign-in page (name, email, password, shipping address; never a card). A retry
    with the same email and password signs in to the account already made instead of failing.
-3. **Check out as guest**: no account and no sign-in. The cart card's button calls `open_guest_checkout` directly
-   (no chat turn, so it can't become a sign-in) and the guest checkout opens in the same card; asked in the chat,
-   Claude calls `guest_checkout`, which shows the same form. The guest types name, email and shipping
-   address on the card, pays with a new card on the secure payment page (used once, never saved), gets
-   the confirmation email and tracks the order later with `track_order` (Order ID + email; also on the website's
-   Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is in the Claude connector only; the
-   website still asks visitors to sign in.
+3. **Continue as a guest**: no account and no sign-in. In the conversation (below) the guest uses their authorized
+   profile and a sandbox card; on the cart card, **Check out as guest** (`open_guest_checkout`) opens the guest
+   form in the same card (name, email, address, then a new card on the secure payment page, used once, never
+   saved). Either way the guest gets the confirmation email and tracks the order with `track_order` (Order ID +
+   email; also on the website's Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is
+   in the Claude connector only; the website still asks visitors to sign in.
+
+**Conversational checkout.** The shopper only chooses the product and authorizes the purchase; Claude does the
+rest with tools, no forms and no website:
+
+| Shopper says | Claude calls | ShopSphere does |
+|---|---|---|
+| "Running shoes, size 10" | `search_shopsphere` | catalog search; cards with photos |
+| "Is the first one waterproof? Reviews?" | `get_shopsphere_product` | real facts only: description, highlights, average rating + review count (there are no review texts; unlisted features are "not listed") |
+| "I want the first one" | `add_to_cart` | price + delivery estimate for that line |
+| "Let's buy it" → "Continue as a guest" | `guest_checkout` | guest checkout priced (live price, stock, tax); offers the authorized profile |
+| "Yes, use my shipping info" | `use_guest_profile` | ships to the profile's address (this order only); the profile's sandbox cards as network + last 4 |
+| "The card ending in 4242" | `review_order` | re-checks stock, price, tax, shipping and date; returns the summary and a signed 15-minute authorization request for exactly that order |
+| "Yes, proceed" | `place_order` (Claude asks permission) | checks the authorization against the live order, runs the simulated cardholder approval, GreenLight, PayIt's 12 checks and the mock gateway, creates the order once, emails it, returns the Order ID |
+| "No" | `decline_order` | nothing approved, charged or ordered |
+
+The guest profile is **fictional and configured on the server** ([`backend/config/demo_guest_profile.json`](backend/config/demo_guest_profile.json),
+[`backend/shop/guest_wallet.py`](backend/shop/guest_wallet.py); `GUEST_DEMO_PROFILE=off` turns it off,
+`GUEST_DEMO_PROFILE_PATH` points at another file). It stands in for profile data a shopper already shares with their
+assistant; nothing is read from Claude's own account or billing. Its cards (Visa •••• 4242, Mastercard •••• 4444) become
+opaque sandbox tokens for that guest only; the model never sees more than network + last 4. A changed order, another
+order's authorization, an expired one or `customer_confirmed=false` is refused, and a repeated `place_order` returns
+the same order without charging again. Choosing "a new card" instead still goes to the secure payment page
+(`place_order` answers `verification_required` with the link). Signed-in customers use the same `review_order` →
+`place_order` with their `checkout_id`, or the card's Approve & pay.
+
+**Agent communication trace.** `place_order` returns a `trace_url` (`/trace/<id>`, [`backend/routers/trace.py`](backend/routers/trace.py)):
+a live timeline of what really ran for that shopper, oldest first: each MCP `tools/call` Claude made, OAuth
+sign-in and token checks, the merchant services each tool called (catalog, cart, checkout, guest profile, sandbox
+tokens), the authorization, GreenLight's consent and policy checks, PayIt's 12 checks, the gateway, network and issuer
+(simulated), the order and the email. Each row has the time, source → destination, protocol (the real transport),
+pattern (the qualified idea, e.g. "AP2-style consent"), operation, request/response summary, status and correlation ID
+(checkout or order). Rows are written by the code that did the work ([`backend/observability/protocol_trace.py`](backend/observability/protocol_trace.py)),
+scrubbed of tokens, card numbers, full emails and street addresses. What's real: MCP (JSON-RPC over Streamable HTTP),
+OAuth 2.1 + PKCE, and HTTP to the mock gateway. AP2/ACP/UCP/VIC appear only as qualified design patterns, with no
+messages of those protocols; **A2A is not implemented** (the agents are in-process Python modules). The trace id is
+an HMAC of the shopper's identity, so a link reaches one trace. `GET /trace` lists recent traces only on a local run
+or with `?key=$TRACE_VIEWER_KEY`.
 
 **Order tracking card.** `track_order` (Order ID + email), `my_orders` (signed in) and the **Track my order** button
 after paying all show the same tracking screen in the card: status and arrival date, a progress bar, a route map
@@ -101,9 +137,11 @@ Sign-in is OAuth 2.1 + PKCE ([`backend/oauth/server.py`](backend/oauth/server.py
 database, so any server worker can redeem them). An expired or wrong token only blocks customer tools (they answer
 401 so Claude refreshes or signs in again); search, cart, guest checkout and tracking carry on as a visitor, with the
 token removed. A guest is identified by a signed 2-hour token for one guest
-checkout ([`backend/shop/guest_checkout.py`](backend/shop/guest_checkout.py)). Paying is only the shopper's own tap
-on the card: those tools are app-only (Claude can't call them), and the backend still checks the exact approved
-version + total and the owner of the checkout. A new card is typed only on the simulated secure payment provider's
+checkout ([`backend/shop/guest_checkout.py`](backend/shop/guest_checkout.py)); a guest's checkout is never sent to
+the sign-in, even if Claude calls an account tool with it (the tool answers with the guest way instead of a 401).
+Payment happens only on the shopper's own tap on the card (app-only tools) or through `place_order` after their
+explicit yes and Claude's permission prompt; the backend still checks the exact approved version + total and the
+owner of the checkout. A new card is typed only on the simulated secure payment provider's
 page, which the card opens in a browser tab; Claude never sees it. In claude.ai: Settings -> Connectors -> Add custom
 connector -> that URL -> Authentication "Sign in when needed".
 

@@ -10,7 +10,11 @@ Who can do what:
   guest token      update_guest_checkout, start_guest_payment, finish_guest_payment (one guest
                    checkout, no account; backend/shop/guest_checkout.py)
   signed in        checkout, saved details, approve_and_pay, new-card payment, my_orders (OAuth)
-Payment tools are app-only (card buttons): the model can prepare a checkout, never pay.
+Card payment buttons are app-only. In the conversation the model pays only through place_order,
+which needs the shopper's explicit yes, a server-signed authorization for the exact order
+(review_order) and Claude's own permission prompt (destructive tool).
+Every tool call and the services behind it are recorded in the shopper's trace
+(backend/observability/protocol_trace.py, shown at /trace/<id>).
 
 Deliberately separate from backend/mcp/server.py: that internal server has
 user-scoped tools (create_checkout with a default user) that must never be public.
@@ -20,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import time
 from functools import lru_cache
 from io import BytesIO
 from typing import Optional
@@ -27,6 +32,7 @@ from typing import Optional
 from fastmcp import FastMCP
 from fastmcp.apps.app import FastMCPApp
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
 from fastmcp.tools.base import ToolResult, _prefab_to_tool_result   # fastmcp==4.0.10 (pinned)
 from mcp.types import TextContent
 from prefab_ui.actions import SetState, ShowToast
@@ -42,8 +48,10 @@ from backend.db.init_db import CATALOG_IMAGE_DIR, get_engine
 from backend.db.schema import User
 from backend.routers import auth as account
 from backend.mcp import card_sections as screens
-from backend.mcp.auth import current_customer, optional_customer, read_visitor_cart, visitor_cart_id
-from backend.shop import card_approval, notifications, payment_routing, profile, ratelimit
+from backend.mcp.auth import (current_customer, issue_purchase_authorization, optional_customer, public_base_url,
+                              read_purchase_authorization, read_visitor_cart, visitor_cart_id)
+from backend.observability import protocol_trace as pt
+from backend.shop import card_approval, guest_wallet, notifications, payment_routing, profile, ratelimit
 from backend.shop import cart as cart_service
 from backend.shop import guest_checkout as guest_service
 from backend.shop import orders as order_service
@@ -77,44 +85,55 @@ ShopSphere first, always:
 3. Never invent ShopSphere products, prices, sizes or stock: use only what the tools return.
    get_shopsphere_product gives details or checks another size or colour.
 
-Buying. The cart needs no sign-in. At checkout the shopper chooses how to buy:
-4. When the shopper picks something ("add the black one in size 10"), call add_to_cart with the
-   product_id, size and colour; ask for whatever is missing. They can also tap Add to cart on a card.
+   Product questions ("is it waterproof?", "what are its reviews?"): call get_shopsphere_product
+   and answer ONLY from what it returns (description, highlights, rating, review count). If a
+   feature isn't listed, say ShopSphere's catalog doesn't list it. ShopSphere has an average rating
+   and a review count, not review texts: never invent reviews. Keep the product the shopper chose
+   in mind through these questions.
+
+Buying is a conversation. The shopper chooses the product and authorizes the purchase; you do
+the rest with the tools below. No forms, no website.
+4. "I want the first one": call add_to_cart with its product_id, size and colour (ask only for
+   what's missing). Confirm the item, the real price and the delivery estimate it returns.
    Before sign-in, results carry a visitor_cart id: pass that same visitor_cart to every later
-   search_shopsphere, add_to_cart, show_cart, checkout and guest_checkout call in this chat, so
-   it stays one cart.
-   The cards work by themselves: Add to cart, View cart & checkout, Checkout, the guest form,
-   Approve & pay and Track my order all run inside the card. The cards never send you chat
-   messages; only answer what the shopper types.
-4a. A shopper who isn't signed in has three choices at checkout (the cart screen shows them):
-   sign in to their ShopSphere account, create a new account, or check out as a guest.
-   - Sign in or create an account: call checkout with visitor_cart. The connector opens
-     ShopSphere's sign-in page, which also has "Create an account"; the cart comes along.
-   - Guest: the cart card's "Check out as guest" button opens the guest checkout right on the card.
-     If the shopper asks in the chat to check out as a guest, call guest_checkout with
-     visitor_cart, NEVER checkout (checkout always asks for a sign-in). No account and no sign-in. The guest types
-     their name, email and shipping address ON the guest checkout card (never ask for them in the
-     chat), then pays with a new card on the secure payment page. If they say they finished
-     paying there, call finish_guest_payment with the guest_token.
-   If the shopper hasn't said which, ask which they prefer; don't pick for them.
-4b. Order tracking: signed-in customers use my_orders. Anyone (guests too) can track with
-   track_order: ask for the Order ID and the email used at checkout. Both show a tracking card
-   (status, arrival date, route map, shipment timeline, items with photos); after it, say at most
-   one short sentence and don't repeat the card's details as a list.
-5. show_cart shows the cart card; checkout shows the review card with Chase offers, points,
-   delivery, tax, total, address and saved card. Pass delivery="express" or use_points=true when
-   asked.
-6. Paying is ONLY the shopper's own Approve & pay tap on the checkout card, followed by the
-   simulated passkey. You cannot pay and must never say an order is paid unless they tell you it
-   went through; then my_orders shows the order and its tracking.
-7. A new card (or a shopper with no saved card) is paid on the secure payment page: on the
-   checkout card they choose "a new card", tap Approve & pay, open the secure page in their
-   browser, type the card there (they can tick Save), then tap "I've finished paying". Never ask
-   for card numbers, expiry or CVC in the chat; if they type one, tell them not to and point them
-   to the secure page. If they say they finished on that page, call finish_new_card_payment.
-8. New shoppers create their ShopSphere account on the sign-in page ("Create an account"), with
-   their shipping address.
-Payments, card networks and issuers in this demo are simulated.
+   search_shopsphere, get_shopsphere_product, add_to_cart, show_cart, checkout and guest_checkout
+   call in this chat.
+   Keep the line_id add_to_cart returns: buy that line (line_ids=[line_id]).
+5. "Let's buy it": if the shopper isn't signed in, ask ONE question: "Would you like to use your
+   ShopSphere account or continue as a guest?" Don't pick for them.
+   - Account (sign in or create one): call checkout with visitor_cart and line_ids. ShopSphere's
+     sign-in page opens (it also has "Create an account"); the cart comes along.
+   - Guest: call guest_checkout with visitor_cart and line_ids. NEVER call checkout,
+     update_checkout_choices, finish_new_card_payment or my_orders for a guest: those are for
+     signed-in accounts and would ask a guest to sign in. Guests never sign in.
+6. Guest checkout, step by step (pass the guest_token from guest_checkout every time):
+   a. If guest_checkout's saved_profile.available is true, ask: "I have your shipping information
+      available (<name>, <ship_to>). Would you like me to use it for this order?"
+      Yes → use_guest_profile(use_shipping=true). No → ask for name, email and shipping address
+      in the chat and call update_guest_checkout, then use_guest_profile(use_shipping=false).
+   b. Tell the estimated delivery date and the payment methods use_guest_profile returns (e.g.
+      "Visa •••• 4242 (sandbox)") and ask which one to use.
+   c. Call review_order with that payment_method_id. Show the order summary: product, size,
+      quantity, price, shipping, tax, total, delivery date and the card, then ask: "Do you
+      authorize me to place this order?"
+   d. Only after a clear yes, call place_order with the authorization from review_order and
+      customer_confirmed=true. A no, or anything unclear, means call decline_order: nothing is
+      charged. Never treat silence, "maybe" or a question as a yes.
+7. Signed-in customers: checkout shows their order (saved address and card; Chase offers,
+   points). They can confirm and pay on the card, or in the chat: review_order(checkout_id,
+   payment_method_id/delivery/use_points as asked), then the same authorize question and
+   place_order(checkout_id, authorization, customer_confirmed=true) or decline_order.
+8. place_order returns the real Order ID: tell it with the total, delivery date and where the
+   confirmation email went, then add one line "Technical trace: <trace_url>". If place_order says
+   verification_required (a new card), give the secure page link: the card is typed there, never
+   in the chat; afterwards call finish_guest_payment (guest) or finish_new_card_payment (account).
+   Never ask for card numbers, expiry or CVC; if the shopper types one, tell them not to.
+   Never say an order is placed unless a tool returned its order_id.
+9. The cards also work by themselves (Add to cart, cart, Checkout, Approve & pay, Track); they
+   never send you chat messages, so only answer what the shopper types.
+10. Order tracking: signed-in customers use my_orders. Guests use track_order with the Order ID
+   and the email used at checkout. Both show a tracking card; add at most one short sentence.
+Payments, card networks, issuers and the guest profile's sandbox cards are simulated.
 """
 
 mcp = FastMCP("ShopSphere", instructions=INSTRUCTIONS)
@@ -235,17 +254,40 @@ def find_products(query: str, category: Optional[str] = None, size: Optional[str
     }
 
 
+def delivery_estimate(delivery_days) -> dict:
+    """ShopSphere's own delivery dates for an order placed today (same rule as checkout)."""
+    d = checkout_service.delivery_dates(int(delivery_days or 5))
+    return {"standard": d["standard"].isoformat(), "express": d["express"].isoformat(),
+            "express_price": checkout_service.EXPRESS_PRICE, "standard_price": 0.0}
+
+
 @mcp.tool(annotations=READ_ONLY)
-def get_shopsphere_product(product_id: str, size: Optional[str] = None) -> dict:
-    """Details of one ShopSphere product (from search_shopsphere): description, price, every
-    size and colour with stock. Pass size to see which colours are in stock in that size."""
+def get_shopsphere_product(product_id: str, size: Optional[str] = None, visitor_cart: Optional[str] = None) -> dict:
+    """Details of one ShopSphere product (from search_shopsphere) for the shopper's questions:
+    description, highlights, price, average rating and review count, every size and colour with
+    stock, and the delivery estimate. Answer only from these facts: a feature that isn't listed
+    (e.g. waterproof) isn't in ShopSphere's catalog, and there are no review texts to quote.
+    Pass size to see which colours are in stock in that size, and the chat's visitor_cart if any."""
     p = talkshop_tools.get_product(product_id)
     if not p:
         return {"store": "ShopSphere", "found": False, "message": f"No ShopSphere product {product_id}."}
     avail = talkshop_tools.check_variant(product_id, size=size)
-    return {"store": "ShopSphere", "found": True, **_card(p, avail, size, None),
-            "all_colors": [{"name": c["name"], "in_stock": c.get("available")} for c in avail.get("colors", [])],
-            "sizes": avail.get("sizes", [])}
+    out = {"store": "ShopSphere", "found": True, **_card(p, avail, size, None),
+           "all_colors": [{"name": c["name"], "in_stock": c.get("available")} for c in avail.get("colors", [])],
+           "sizes": avail.get("sizes", []),
+           "reviews": {"average_rating": p.get("rating"), "review_count": p.get("review_count"),
+                       "review_texts_available": False,
+                       "note": "ShopSphere's catalog has the average rating and number of reviews only; no "
+                               "individual review texts. Don't quote or invent reviews."},
+           "delivery_estimate": delivery_estimate(p.get("delivery_days")),
+           "answering_questions": "Use only the description and highlights for features. If a feature (waterproof, "
+                                  "wide fit…) isn't mentioned, say ShopSphere's catalog doesn't list it."}
+    pt.record(pt.MCP_SERVER, "Catalog service (SneakPeek)", pt.IN_PROCESS, "Product details (clarification)",
+              request=f"{product_id}" + (f", size {size}" if size else ""),
+              response=f"{p['name']}: ${p.get('price')}, rating {p.get('rating')} from {p.get('review_count')} reviews; "
+                       f"highlights {', '.join(p.get('tags') or []) or '—'}",
+              pattern="UCP-inspired product discovery")
+    return out
 
 
 # ── Product cards inside the chat (MCP Apps) ───────────────────────────────────
@@ -405,6 +447,13 @@ def search_shopsphere(query: str, category: Optional[str] = None, size: Optional
     result = find_products(query, category=category, size=size, color=color, max_price=max_price,
                            gender=gender, brand=brand, limit=limit)
     _with_cart(result, visitor_cart)
+    filters = ", ".join(f"{k} {v}" for k, v in (("category", category), ("size", result.get("size")), ("colour", color),
+                                                ("under $", max_price), ("brand", brand)) if v)
+    pt.record(pt.MCP_SERVER, "Catalog service (SneakPeek)", pt.IN_PROCESS, "Product search",
+              request=f"\"{query}\"" + (f" · {filters}" if filters else ""),
+              response=(f"{len(result['products'])} in stock: " + "; ".join(
+                  f"{p['name']} ${p['price']}" for p in result["products"])) if result["found"] else "No match",
+              status="success" if result["found"] else "info", pattern="UCP-inspired product discovery")
     view, state = _cards_view(result)
     return _ui(view, state, result)
 
@@ -436,6 +485,7 @@ def _with_cart(result: dict, visitor_cart: Optional[str]) -> None:
     if result.get("products") and optional_customer() is None:
         vid = read_visitor_cart(visitor_cart) or f"VIS{secrets.token_hex(4).upper()}"
         result["visitor_cart"] = visitor_cart_id(vid)
+        pt.bind(pt.trace_id_for(vid))
         result["next_step"] = (result.get("next_step") or "") + (
             " The shopper isn't signed in: pass visitor_cart to later search_shopsphere, add_to_cart, "
             "show_cart and checkout calls in this chat. Sign-in is only needed at checkout.")
@@ -455,6 +505,7 @@ def _shopper(visitor_cart: Optional[str]) -> tuple[str, Optional[str]]:
         if not db.query(User).filter_by(user_id=vid).first():
             account.new_visitor(db, vid)
             db.commit()
+    pt.bind(pt.trace_id_for(vid))
     return vid, visitor_cart_id(vid)
 
 
@@ -502,17 +553,26 @@ def add_to_cart(product_id: str, size: Optional[str] = None, color: Optional[str
     the visitor_cart id from earlier results in this chat if there is one. Nothing is charged."""
     p, sku, color = _resolve_sku(product_id, size, color)
     uid, cart_id = _shopper(visitor_cart)
+    qty = max(1, min(int(quantity or 1), 10))
     try:
-        cart, line_id = talkshop_tools.add_to_cart(uid, sku, max(1, min(int(quantity or 1), 10)))
+        cart, line_id = talkshop_tools.add_to_cart(uid, sku, qty)
     except CartError as exc:
         raise ToolError(exc.message)
-    out = {"added": p["name"], "sku": sku, "size": size, "color": color, "line_id": line_id,
+    pt.record(pt.MCP_SERVER, "Cart service (CartUp)", pt.IN_PROCESS, "Add to cart",
+              request=f"{p['name']} · {_variant_label(size, color)} × {qty}",
+              response=f"In stock; cart now {cart['item_count']} item(s), subtotal ${cart['subtotal']:.2f}",
+              pattern="ACP-style cart")
+    out = {"added": p["name"], "product_id": p["product_id"], "sku": sku, "size": size, "color": color,
+           "quantity": qty, "unit_price": p.get("price"), "line_total": round((p.get("price") or 0) * qty, 2),
+           "currency": p.get("currency", "USD"), "line_id": line_id,
+           "delivery_estimate": delivery_estimate(p.get("delivery_days")),
            "cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"],
-           "next_step": "Offer show_cart or checkout. Nothing has been charged."}
+           "next_step": "Confirm the item, its price and the delivery estimate. Nothing has been charged. When the "
+                        "shopper wants to buy it, buy this line (line_ids=[line_id])."}
     if cart_id:
-        out.update(visitor_cart=cart_id, next_step=out["next_step"] + " Pass visitor_cart to show_cart, "
-                   "checkout and guest_checkout. At checkout the shopper signs in, creates an account (the cart "
-                   "comes along) or checks out as a guest.")
+        out.update(visitor_cart=cart_id, next_step=out["next_step"] + " They aren't signed in: ask whether to use "
+                   "their ShopSphere account (checkout with visitor_cart) or continue as a guest (guest_checkout "
+                   "with visitor_cart). Pass visitor_cart to show_cart, checkout and guest_checkout.")
     return out
 
 
@@ -672,13 +732,37 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
     return _ui(view, state, data)
 
 
+_GUEST_WAY = ("This is a guest checkout, so no sign-in is needed: use the guest_token from guest_checkout with "
+              "review_order (delivery, payment), place_order, finish_guest_payment, and track_order to track it.")
+
+
+def _customer_for(checkout_id: Optional[str]):
+    """The signed-in customer for a customer tool. A guest's checkout id gets the guest way, never a
+    sign-in (McpSignIn lets such a call through instead of answering 401)."""
+    user = optional_customer()
+    if user:
+        return user
+    if checkout_id:
+        with Session(get_engine()) as db:
+            from backend.db.schema import Checkout
+            co = db.query(Checkout).filter_by(checkout_id=str(checkout_id)[:40]).first()
+            if co and checkout_service.is_guest_owner(db, co.user_id):
+                pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.MCP, "Guest kept out of account sign-in",
+                          request=f"account-only tool called for guest checkout {co.checkout_id}",
+                          response="Answered with the guest tools instead of a sign-in challenge", status="info",
+                          correlation=co.checkout_id)
+                raise ToolError(_GUEST_WAY)
+    return current_customer()
+
+
 @cards.tool(model=True)
 def update_checkout_choices(checkout_id: str, address_id: Optional[str] = None, pay_with: Optional[str] = None,
                             delivery: Optional[str] = None, use_points: Optional[str] = None) -> dict:
-    """Change an open ShopSphere checkout: shipping address (address_id), payment (a saved card's
+    """Change a signed-in customer's open ShopSphere checkout (not for guests: they use review_order
+    with their guest_token): shipping address (address_id), payment (a saved card's
     payment_method_id, "wallet", or "provider" = a new card on the secure payment page), delivery ("standard"/"express") and points ("yes"/"no").
     Totals and Chase offers are recalculated (Chase offers need a Chase card). Nothing is charged."""
-    user = current_customer()
+    user = _customer_for(checkout_id)
     try:
         co = talkshop_tools.get_checkout(user.user_id, checkout_id)
     except CheckoutError as exc:
@@ -695,35 +779,56 @@ async def approve_and_pay(checkout_id: str, checkout_version: int, final_amount:
     approval and payment as the website: scoped consent for this exact order, the simulated
     passkey, then the simulated gateway. The model can't call this."""
     user = current_customer()
-    uid = user.user_id
-    scope = {"action": "PAY", "checkout_version": int(checkout_version), "final_amount": float(final_amount),
-             "currency": currency}
     try:
-        with Session(get_engine()) as db:
-            co = checkout_service.get_checkout(db, uid, checkout_id)
-            route = payment_routing.route(db, co).get("route")
-            approval_id = instruction_id = None
-            if route == "saved_card":
-                started = card_approval.start(db, uid, checkout_id)
-                approval_id = started["approval"]["approval_id"]
-                card_approval.verify(db, uid, checkout_id, approval_id, started["passkey"]["nonce"], True)
-            elif route == "vic":
-                instr, pk = vic_instructions.create(db, uid, checkout_id, "button")
-                instruction_id = instr.instruction_id
-                vic_instructions.authenticate(db, uid, instruction_id, pk["challenge_id"], pk["nonce"], True)
-            elif route != "wallet":
-                raise ToolError("Choose \"a new card\" on the checkout card to pay on the secure payment page."
-                                if route in ("none", "provider_handoff") else
-                                "Set up Visa agent payments on ShopSphere first, then try again.")
-        res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode="button",
-                                            instruction_id=instruction_id, approval_id=approval_id, **scope)
+        res = await _pay(user, checkout_id, checkout_version, final_amount, currency, consent_mode="button")
     except (CheckoutError, VicError) as exc:
         raise ToolError(exc.message)
+    if res.get("status") == "provider_handoff_needed":
+        raise ToolError("Choose \"a new card\" on the checkout card to pay on the secure payment page.")
     if res.get("status") != "authorized":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
     order = res.get("order") or {}
     return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
             "arrives": order.get("delivery_date"), "email": res.get("confirmation_email")}
+
+
+async def _pay(user, checkout_id: str, checkout_version: int, final_amount: float, currency: str,
+               consent_mode: str, guest: bool = False) -> dict:
+    """The shopper's approval of one exact order, then payment: the same approval step for the way
+    they pay (simulated passkey for a card on file, the authenticated instruction for Visa agent
+    payments, none for the Wallet), then payment.confirm's GreenLight → PayIt → order path.
+    consent_mode "button" = a card button; "typed" = the shopper's explicit yes in the conversation.
+    A new card isn't paid here: {"status": "provider_handoff_needed"} (it is verified on the
+    secure provider page). Raises CheckoutError / VicError; the engine's steps go to the trace."""
+    uid = user.user_id
+    scope = {"action": "PAY", "checkout_version": int(checkout_version), "final_amount": float(final_amount),
+             "currency": currency}
+    with Session(get_engine()) as db:
+        co = checkout_service.get_checkout(db, uid, checkout_id)
+        route = payment_routing.route(db, co).get("route")
+        approval_id = instruction_id = None
+        if route == "saved_card":
+            started = card_approval.start(db, uid, checkout_id)
+            approval_id = started["approval"]["approval_id"]
+            card_approval.verify(db, uid, checkout_id, approval_id, started["passkey"]["nonce"], True)
+        elif route == "vic" and not guest:
+            instr, pk = vic_instructions.create(db, uid, checkout_id, consent_mode)
+            instruction_id = instr.instruction_id
+            vic_instructions.authenticate(db, uid, instruction_id, pk["challenge_id"], pk["nonce"], True)
+        elif route == "provider_handoff":
+            return {"status": "provider_handoff_needed"}
+        elif route != "wallet" or guest:
+            raise CheckoutError("NO_PAYMENT_METHOD", "Choose how to pay first." if route == "none" else
+                                "Set up Visa agent payments on ShopSphere first, then try again.", 409)
+    res = await payment_service.confirm(user, checkout_id, consent=True, consent_mode=consent_mode,
+                                        instruction_id=instruction_id, approval_id=approval_id, guest=guest, **scope)
+    _trace_engine(res, checkout_id)
+    return res
+
+
+def _trace_engine(res: dict, correlation: Optional[str]) -> None:
+    """The payment engine's own steps (as it returned them) into the shopper's trace."""
+    pt.from_engine(res.get("trace") or [], correlation=(res.get("order") or {}).get("order_id") or correlation)
 
 
 @cards.tool()
@@ -770,6 +875,7 @@ async def _open_secure_page(user, checkout_id: str, checkout_version: int, final
                                                 guest=guest, **scope)
     except CheckoutError as exc:
         raise ToolError(exc.message)
+    _trace_engine(res, checkout_id)
     if res.get("status") != "provider_handoff":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
     return {"status": "provider_handoff", "hosted_url": res["hosted_url"],
@@ -780,8 +886,9 @@ async def _open_secure_page(user, checkout_id: str, checkout_version: int, final
 async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional[str] = None) -> dict:
     """After the shopper finished on the secure payment page: ShopSphere asks the payment provider
     itself for the result and, if the card was verified, places the order (once). Call it when the
-    shopper says they finished paying there. Nothing is charged unless they completed that page."""
-    user = current_customer()
+    shopper says they finished paying there. Nothing is charged unless they completed that page.
+    Signed-in customers only: a guest uses finish_guest_payment with their guest_token."""
+    user = _customer_for(checkout_id)
     if not payment_session_id:
         with Session(get_engine()) as db:
             payment_session_id = checkout_service.get_checkout(db, user.user_id, checkout_id).provider_session_id
@@ -791,6 +898,7 @@ async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional
         res = await payment_service.complete_provider(user, checkout_id, payment_session_id[:80])
     except CheckoutError as exc:
         raise ToolError(exc.message)
+    _trace_engine(res, checkout_id)
     if res.get("status") == "pending":
         raise ToolError("The secure payment page isn't finished yet. Enter the card there, then tap "
                         "\"I've finished paying\" again.")
@@ -848,42 +956,308 @@ def open_guest_checkout(visitor_cart: str) -> dict:
     return {k: state[k] for k in screens.GUEST_OPENED}
 
 
-@cards.ui(annotations=WRITE)
+def _order_summary(co: dict) -> dict:
+    """The order as ShopSphere computed it (never the model's numbers): what the shopper approves."""
+    pm = co.get("payment_method") or {}
+    paying = ("New card on the secure payment page" if co.get("pay_with") == "provider" else
+              "ShopSphere Wallet" if co.get("pay_with") == "wallet" else
+              (f"{pm.get('display')}{' (sandbox)' if str(pm.get('payment_method_id', '')).startswith('sbx_') else ''}"
+               if pm else None))
+    delivery = co.get("delivery") or {}
+    return {
+        "checkout_id": co["checkout_id"], "checkout_version": co.get("checkout_version"),
+        "items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"), "quantity": ln["quantity"],
+                   "unit_price": ln.get("unit_price"), "line_total": round((ln.get("unit_price") or 0) * ln["quantity"], 2),
+                   "in_stock": ln.get("in_stock", True)} for ln in co["lines"]],
+        "subtotal": co.get("subtotal"), "discounts": (co.get("invoice") or {}).get("discounts") or [],
+        "shipping": co.get("shipping"), "tax": co.get("tax"), "total": co.get("total"), "currency": co.get("currency"),
+        "delivery": delivery.get("method"), "estimated_delivery": delivery.get("date"),
+        "delivery_options": delivery.get("options"),
+        "ship_to": (co.get("address") or {}).get("display"),
+        "pay_with": paying, "ready": co.get("ready"), "issues": [i.get("message") or i.get("code")
+                                                               for i in co.get("issues") or []],
+    }
+
+
+def _trace_url(trace_id: Optional[str]) -> Optional[str]:
+    if not trace_id:
+        return None
+    from fastmcp.server.dependencies import get_http_headers
+    try:
+        base = public_base_url(get_http_headers(include_all=True))
+    except Exception:
+        base = public_base_url()
+    return f"{base}/trace/{trace_id}"
+
+
+@cards.tool(model=True)
 def guest_checkout(visitor_cart: str, line_ids: Optional[list[str]] = None,
-                   delivery: Optional[str] = None) -> ToolResult:
-    """Check out this chat's ShopSphere cart as a GUEST: no account and no sign-in. Use it when the
-    shopper chooses "check out as guest". Shows the guest checkout card, where the shopper types
-    their name, email and shipping address themselves (don't ask for them in the chat), picks
-    delivery, taps Approve & pay and pays with a new card on the secure payment page. Nothing is
-    charged by this call. Guests don't get points, the Wallet or Chase offers.
+                   delivery: Optional[str] = None) -> dict:
+    """Start a GUEST checkout for this chat's ShopSphere cart: no account, no sign-in, no form. Use
+    it when the shopper says to continue as a guest. ShopSphere prices the order (live price, stock,
+    tax, delivery) and returns a guest_token for the next steps, plus saved_profile: the shipping
+    information the shopper has authorized for checkout (if available). Next, ask whether to use
+    it, then call use_guest_profile. Nothing is charged. Guests don't get points, the Wallet or
+    Chase offers.
 
     Args:
         visitor_cart: the visitor_cart id from earlier results in this chat (required).
-        line_ids: optional cart line ids to buy (from show_cart); default: the whole cart.
+        line_ids: the cart line(s) the shopper is buying (add_to_cart's line_id); default: whole cart.
         delivery: optional "standard" or "express".
     """
     co, token = _start_guest(visitor_cart, line_ids, delivery)
-    view, state = _guest_view(co, token)
-    data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "shipping", "tax", "total",
-                                   "currency")}
-    data.update({"guest_token": token, "guest": True,
-                 "items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"),
-                            "quantity": ln["quantity"]} for ln in co["lines"]],
-                 "delivery": (co.get("delivery") or {}).get("method"), "arrives": (co.get("delivery") or {}).get("date"),
-                 "ready": False,
-                 "next_step": "The guest types name, email and shipping address on this card (never ask for them in "
-                              "the chat), then taps Approve & pay and enters a new card on the secure payment page. "
-                              "If they say they finished there, call finish_guest_payment with guest_token. Never say "
-                              "the order is paid unless that returns an order_id."})
-    return _ui(view, state, data)
+    pt.record(pt.MCP_SERVER, "Checkout service (CartUp)", pt.IN_PROCESS, "Guest checkout created",
+              request=f"{co['item_count']} item(s), no account, no sign-in",
+              response=f"{co['checkout_id']}: subtotal ${co['subtotal']:.2f}, live price + stock checked",
+              pattern="ACP-style create checkout", correlation=co["checkout_id"])
+    pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.MCP, "Guest checkout token issued",
+              request="Capability for this one checkout", response="Signed JWT (HS256), 2 hours, names this visitor + "
+              "checkout only", correlation=co["checkout_id"])
+    offer = guest_wallet.offer()
+    out = {**_order_summary(co), "guest": True, "guest_token": token, "ready": False, "saved_profile": offer}
+    if offer.get("available"):
+        out["pay_with"] = "not chosen yet"                 # the shopper picks after use_guest_profile
+    out["next_step"] = (
+        f"Ask: \"I have your shipping information available ({offer['name']}, {offer['ship_to']}). Would you like "
+        "me to use it for this order?\" Yes → use_guest_profile(guest_token, use_shipping=true). No → ask for name, "
+        "email and shipping address, call update_guest_checkout, then use_guest_profile(use_shipping=false)."
+        if offer.get("available") else
+        "Ask for the guest's name, email and shipping address, call update_guest_checkout with guest_token, then "
+        "review_order(guest_token). They pay with a new card on the secure payment page.")
+    return out
 
 
-@cards.tool()
+@cards.tool(model=True)
+def use_guest_profile(guest_token: str, use_shipping: bool = True) -> dict:
+    """The guest answered whether to use the shipping information from their authorized profile
+    (guest_checkout's saved_profile). use_shipping=true ships this order there (this order only, no
+    account). Returns the estimated delivery date, the updated total and the payment methods
+    available from the profile (sandbox cards, shown as network + last 4 only), to ask which one
+    to use. Nothing is charged."""
+    user, checkout_id = _guest(guest_token)
+    prof = guest_wallet.load()
+    if not prof:
+        raise ToolError("No authorized profile is set up on this ShopSphere server. Ask the guest for their name, "
+                        "email and shipping address and call update_guest_checkout.")
+    with Session(get_engine()) as db:
+        try:
+            if use_shipping:
+                guest_wallet.apply_shipping(db, user.user_id, checkout_id, prof)
+            pms = guest_wallet.payment_methods(db, user.user_id, prof)
+            co = checkout_service.snapshot(db, checkout_service.get_checkout(db, user.user_id, checkout_id))
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+    addr = co.get("address") or {}
+    if use_shipping:
+        pt.record("Demo guest wallet (configured profile)", pt.MCP_SERVER, pt.IN_PROCESS,
+                  "Shipping information shared (shopper said yes)",
+                  request="Shopper agreed to use their authorized profile for this order",
+                  response=f"Name + {addr.get('city')}, {addr.get('state')} address applied to this order only; "
+                           "email kept for the confirmation", correlation=checkout_id,
+                  pattern="Fictional demo profile")
+    pt.record("Demo guest wallet (configured profile)", "Mock gateway / PSP vault", pt.SIMULATED,
+              "Sandbox payment tokens issued",
+              request=f"{len(pms)} sandbox card(s) for this guest", layer="simulated", correlation=checkout_id,
+              response="; ".join(f"{p.brand} •••• {p.last4} → opaque token" for p in pms) +
+                       ". The assistant sees network + last 4 only", pattern="Simulated PSP tokens")
+    out = {**_order_summary(co), "shipping_from_profile": bool(use_shipping), "pay_with": "not chosen yet",
+           "ready": False, "payment_methods": [guest_wallet.view(p) for p in pms],
+           "next_step": "Tell the estimated delivery date and the payment methods, and ask which one to use. Then "
+                        "call review_order(guest_token, payment_method_id)." if co.get("address") else
+                        "Ask for the guest's name, email and shipping address and call update_guest_checkout, then "
+                        "ask which payment method to use."}
+    return out
+
+
+def _owner(guest_token: Optional[str], checkout_id: Optional[str]):
+    """(user, checkout id, guest?) for the conversational checkout tools: a guest by their guest
+    token, else the signed-in customer's own checkout. Never a sign-in for a guest."""
+    if guest_token:
+        user, cid = _guest(guest_token)
+        return user, cid, True
+    if not checkout_id:
+        raise ToolError("Pass guest_token (guest checkout) or checkout_id (a signed-in customer's checkout).")
+    user = _customer_for(checkout_id)
+    with Session(get_engine()) as db:
+        try:
+            checkout_service.get_checkout(db, user.user_id, checkout_id)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+    return user, checkout_id, False
+
+
+def _placed_order(db: Session, co) -> Optional[dict]:
+    from backend.db.schema import Order
+    if co.status != "paid":
+        return None
+    row = (db.query(Order).filter(Order.checkout_id == co.checkout_id, Order.display_id.isnot(None))
+           .order_by(Order.id.desc()).first())
+    return order_service.order_dict(db, row) if row else None
+
+
+@cards.tool(model=True)
+def review_order(guest_token: Optional[str] = None, checkout_id: Optional[str] = None,
+                 payment_method_id: Optional[str] = None, delivery: Optional[str] = None,
+                 use_points: Optional[str] = None) -> dict:
+    """Final order review before the shopper authorizes payment (guests: guest_token; signed-in
+    customers: checkout_id). Applies the chosen payment method (a payment_method_id from
+    use_guest_profile or checkout, "wallet", or "provider" = a new card on the secure page),
+    delivery ("standard"/"express") and points ("yes"/"no", customers only), then re-checks live
+    stock, price, tax, shipping and the delivery date. Returns the summary to show and an
+    authorization request for exactly this order (15 min). Ask "Do you authorize me to place this
+    order?"; only on a clear yes call place_order. Nothing is charged."""
+    user, cid, guest = _owner(guest_token, checkout_id)
+    uid = user.user_id
+    with Session(get_engine()) as db:
+        co = checkout_service.get_checkout(db, uid, cid)
+        done = _placed_order(db, co)
+        if done:
+            return {"already_placed": True, "order_id": done["order_id"], "total": done.get("total"),
+                    "next_step": "This order is already placed; nothing more to pay."}
+        if co.status != "open":
+            raise ToolError(f"This checkout is {co.status}. Start a new checkout from the cart.")
+        try:
+            if guest:
+                pm = (payment_method_id or "").strip()
+                if pm == "provider":
+                    checkout_service.update_checkout(db, uid, cid, pay_with="provider")
+                elif pm:
+                    prof = guest_wallet.load()
+                    options = guest_wallet.payment_methods(db, uid, prof) if prof else guest_wallet.existing(db, uid)
+                    pick = next((c for c in options if pm == c.payment_method_id or pm.endswith(c.last4)), None)
+                    if not pick:
+                        raise ToolError("That payment method isn't one of this guest's options. Use a "
+                                        "payment_method_id from use_guest_profile, or \"provider\" for a new card.")
+                    checkout_service.update_checkout(db, uid, cid, payment_method_id=pick.payment_method_id)
+                if delivery in ("standard", "express"):
+                    checkout_service.update_checkout(db, uid, cid, delivery_method=delivery)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+    if not guest:
+        snap = talkshop_tools.get_checkout(uid, cid)
+        _apply_choices(uid, snap, None, payment_method_id, delivery, use_points)
+    with Session(get_engine()) as db:
+        co = checkout_service.get_checkout(db, uid, cid)
+        issues = checkout_service.refresh(db, co)              # live stock + prices, right now
+        db.commit()
+        snap = checkout_service.snapshot(db, co, issues)
+    summary = _order_summary(snap)
+    pt.record(pt.MCP_SERVER, "Checkout service (CartUp)", pt.IN_PROCESS, "Order re-verified before authorization",
+              request=f"{cid}: payment {summary['pay_with'] or 'not chosen'}, {summary['delivery']} delivery",
+              response=f"Live stock + price + tax + shipping recomputed: total ${snap['total']:.2f}, version "
+                       f"{snap['checkout_version']}, delivery {summary['estimated_delivery']}"
+                       + ("" if snap["ready"] else f"; not ready: {', '.join(summary['issues'])}"),
+              status="success" if snap["ready"] else "pending", pattern="ACP-style update checkout", correlation=cid)
+    if not snap["ready"]:
+        return {**summary, "next_step": "Not ready to authorize yet: " + "; ".join(summary["issues"])}
+    pay_ref = snap.get("pay_with") if snap.get("pay_with") != "card" else (snap.get("payment_method") or {}).get(
+        "payment_method_id", "card")
+    auth = issue_purchase_authorization(uid, cid, snap["checkout_version"], snap["total"], snap["currency"],
+                                        snap["checkout_hash"], pay_ref)
+    pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.MCP, "Purchase authorization requested",
+              request="Exact order terms to show the shopper",
+              response=f"Signed request (15 min) bound to {cid} v{snap['checkout_version']}, "
+                       f"{snap['currency']} {snap['total']:.2f}, {summary['pay_with']}, order fingerprint",
+              status="pending", pattern="AP2-style intent → cart mandate (concept only)", correlation=cid)
+    return {**summary, "authorization": auth, "authorization_expires_in_minutes": 15,
+            "next_step": "Show this summary (items with size, quantity and price; shipping; tax; total; estimated "
+                         "delivery; payment method) and ask: \"Do you authorize me to place this order?\" Only "
+                         "after a clear yes, call place_order with this authorization and customer_confirmed=true. "
+                         "If they decline, call decline_order."}
+
+
+@cards.tool(model=True)
+async def place_order(authorization: str, customer_confirmed: bool, guest_token: Optional[str] = None,
+                      checkout_id: Optional[str] = None) -> dict:
+    """Place and pay for the order the shopper just authorized. Call ONLY after the shopper clearly
+    said yes to review_order's summary, with that authorization and customer_confirmed=true.
+    ShopSphere checks the authorization against the live order (same version, total, currency,
+    payment method and fingerprint; a change means review_order again), runs the approval and the
+    simulated payment, creates the order once and emails the confirmation. Calling it again returns
+    the same order: it never charges twice. Guests: guest_token; customers: checkout_id."""
+    user, cid, guest = _owner(guest_token, checkout_id)
+    if customer_confirmed is not True:
+        raise ToolError("Only place the order after the shopper explicitly authorizes it. Ask them first.")
+    with Session(get_engine()) as db:
+        co = checkout_service.get_checkout(db, user.user_id, cid)
+        done = _placed_order(db, co)
+        current = checkout_service.snapshot(db, co) if not done else None
+    if done:
+        pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.MCP, "Repeated place_order: same order returned",
+                  request="Retry after the order was placed", response=f"{done['order_id']}: not charged again",
+                  status="info", pattern="Idempotency", correlation=done["order_id"])
+        return {"status": "authorized", "duplicate": True, "order_id": done["order_id"], "total": done.get("total"),
+                "arrives": done.get("delivery_date"), "trace_url": _trace_url(pt.current()),
+                "next_step": "This order was already placed; it was not charged again."}
+    claims = read_purchase_authorization(authorization)
+    if not claims or claims.get("sub") != user.user_id or claims.get("chk") != cid:
+        raise ToolError("That authorization isn't valid for this order (or it expired). Call review_order again and "
+                        "ask the shopper to authorize the new summary.")
+    pay_ref = current.get("pay_with") if current.get("pay_with") != "card" else (
+        current.get("payment_method") or {}).get("payment_method_id", "card")
+    same = (claims.get("ver") == current["checkout_version"] and claims.get("amt") == round(current["total"] * 100)
+            and claims.get("cur") == current["currency"] and claims.get("fp") == (current["checkout_hash"] or "")[:16]
+            and claims.get("pay") == pay_ref)
+    pt.record(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, "Customer purchase authorization",
+              request=f"Shopper said yes in the chat (customer_confirmed=true) and allowed Claude's payment prompt; "
+                      f"authorization for {cid} v{claims.get('ver')} {claims.get('cur')} {claims.get('amt', 0) / 100:.2f}",
+              response="Matches the live order" if same else "Order changed since it was authorized: refused",
+              status="success" if same else "failure", pattern="AP2-style scoped consent (concept only)",
+              correlation=cid)
+    if not same:
+        raise ToolError("The order changed after the shopper authorized it (price, delivery, address or card), so "
+                        "nothing was charged. Call review_order and ask them to authorize the new summary.")
+    try:
+        res = await _pay(user, cid, claims["ver"], claims["amt"] / 100, claims["cur"], consent_mode="typed",
+                         guest=guest)
+    except (CheckoutError, VicError) as exc:
+        raise ToolError(exc.message)
+    if res.get("status") == "provider_handoff_needed":
+        page = await _open_secure_page(user, cid, claims["ver"], claims["amt"] / 100, claims["cur"], guest=guest)
+        return {"status": "verification_required", "secure_page": page["hosted_url"],
+                "trace_url": _trace_url(pt.current()),
+                "next_step": "A new card is entered and verified on the secure payment page, never in the chat: give "
+                             "the shopper this link. When they say they're done, call "
+                             + ("finish_guest_payment with guest_token." if guest else
+                                "finish_new_card_payment with checkout_id.")}
+    if res.get("status") != "authorized":
+        raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
+    order = res.get("order") or {}
+    from backend.db.schema import Order
+    with Session(get_engine()) as db:
+        row = db.query(Order).filter_by(order_id=order.get("internal_order_id")).first()
+        mail = (notifications.confirmation_for(db, row) if row else None) or {}
+    return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
+            "currency": order.get("currency", "USD"), "arrives": order.get("delivery_date"),
+            "paid_with": res.get("card") or (order.get("payment") or {}).get("display"),
+            "confirmation_sent_to": _mask_email(mail.get("to")), "email_delivery": mail.get("delivery") or "none",
+            "trace_url": _trace_url(pt.current()),
+            "next_step": "Confirm the Order ID, total and estimated delivery, and where the confirmation email went. "
+                         "Then one line: \"Technical trace: <trace_url>\". Guests track it with track_order (Order ID "
+                         "+ their email); customers with my_orders."}
+
+
+@cards.tool(model=True)
+def decline_order(guest_token: Optional[str] = None, checkout_id: Optional[str] = None, reason: str = "") -> dict:
+    """The shopper did NOT authorize the order (said no, or wants to stop). Records that nothing was
+    approved; no payment and no order are created. The checkout stays open in case they change
+    their mind (they can review_order again)."""
+    user, cid, guest = _owner(guest_token, checkout_id)
+    payment_service.record_approval_cancelled(user.user_id, cid, "CUSTOMER_DECLINED")
+    pt.record(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, "Customer declined authorization",
+              request=(reason or "Shopper said no")[:120], response="Nothing approved, charged or ordered",
+              status="info", pattern="AP2-style consent (concept only)", correlation=cid)
+    return {"status": "not_placed", "charged": False, "order_created": False,
+            "next_step": "Tell the shopper nothing was ordered or charged. Their cart is kept."}
+
+
+@cards.tool(model=True)
 def update_guest_checkout(guest_token: str, delivery: Optional[str] = None, full_name: str = "", email: str = "",
                           line1: str = "", line2: str = "", city: str = "", state: str = "",
                           postal_code: str = "") -> dict:
-    """App-only (guest checkout card): save the guest's own contact + shipping details and/or the
-    delivery choice. ShopSphere validates them and recalculates the total."""
+    """Guest checkout: save the guest's own contact + shipping details (when they don't use their
+    authorized profile, or on the guest card) and/or the delivery choice ("standard"/"express").
+    ShopSphere validates them and recalculates the total. Never pass card details here."""
     details = {"full_name": full_name, "email": email, "line1": line1, "line2": line2 or None, "city": city,
                "state": state, "postal_code": postal_code}
     typed = any(str(v or "").strip() for v in details.values())
@@ -924,6 +1298,7 @@ async def finish_guest_payment(guest_token: str, payment_session_id: Optional[st
         res = await payment_service.complete_provider(user, checkout_id, payment_session_id[:80], guest=True)
     except CheckoutError as exc:
         raise ToolError(exc.message)
+    _trace_engine(res, checkout_id)
     if res.get("status") == "pending":
         raise ToolError("The secure payment page isn't finished yet. Enter the card there, then tap "
                         "\"I've finished paying\" again.")
@@ -1076,9 +1451,113 @@ def my_orders(order_id: Optional[str] = None) -> ToolResult:
 _ASK_TO_CHECKOUT = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 _ASK_TO_PAY = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}
 _NO_PROMPT = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
-APPROVAL = {"checkout": _ASK_TO_CHECKOUT, "open_checkout": _ASK_TO_CHECKOUT, "guest_checkout": _ASK_TO_CHECKOUT,
+# The conversational guest checkout (guest_checkout → use_guest_profile → review_order) only prepares
+# the order; the shopper commits at place_order, which Claude always asks about (destructive).
+APPROVAL = {"checkout": _ASK_TO_CHECKOUT, "open_checkout": _ASK_TO_CHECKOUT,
             "open_guest_checkout": _ASK_TO_CHECKOUT, "approve_and_pay": _ASK_TO_PAY,
-            "start_new_card_payment": _ASK_TO_PAY, "start_guest_payment": _ASK_TO_PAY}
+            "start_new_card_payment": _ASK_TO_PAY, "start_guest_payment": _ASK_TO_PAY, "place_order": _ASK_TO_PAY}
+
+
+# ── The agent communication trace: every tool call, as it ran ───────────────────
+
+_SECRET_ARGS = {"guest_token": "‹guest token›", "authorization": "‹purchase authorization›",
+                "visitor_cart": "‹visitor cart›", "payment_session_id": "‹payment session›"}
+_PRIVATE_ARGS = {"line1", "line2", "postal_code", "full_name"}
+
+
+def _args_summary(args: dict) -> str:
+    parts = []
+    for k, v in args.items():
+        if v in (None, "", [], {}):
+            continue
+        if k in _SECRET_ARGS:
+            parts.append(f"{k}={_SECRET_ARGS[k]}")
+        elif k in _PRIVATE_ARGS:
+            parts.append(f"{k}=‹provided›")
+        elif k == "email":
+            parts.append(f"email={_mask_email(str(v))}")
+        else:
+            parts.append(f"{k}={json.dumps(v) if not isinstance(v, str) else v}")
+    return ", ".join(parts)[:400] or "(no arguments)"
+
+
+def _result_summary(data) -> str:
+    if not isinstance(data, dict):
+        return "Card shown"
+    if data.get("products") is not None:
+        return (f"{len(data['products'])} product(s): " + "; ".join(
+            f"{p.get('name')} ${p.get('price')}" for p in data["products"])) if data.get("found") else "No match"
+    keys = ("found", "status", "order_id", "added", "unit_price", "line_total", "total", "estimated_delivery",
+            "arrives", "ready", "pay_with", "cart_items", "item_count", "duplicate", "charged", "message")
+    bits = [f"{k}={data[k]}" for k in keys if data.get(k) not in (None, "", [])]
+    if data.get("payment_methods"):
+        bits.append("payment options: " + ", ".join(p.get("display", "") for p in data["payment_methods"]))
+    if (data.get("saved_profile") or {}).get("available"):
+        bits.append("authorized profile available")
+    if data.get("authorization"):
+        bits.append("authorization request issued")
+    if data.get("guest_token"):
+        bits.append("guest token issued")
+    if data.get("secure_page"):
+        bits.append("secure payment page link")
+    return ", ".join(bits)[:400] or "OK"
+
+
+def _trace_for_call(args: dict) -> Optional[str]:
+    """The shopper this call belongs to: guest token → visitor; visitor cart → visitor; else the
+    signed-in customer (whose trace takes in their visitor rows once the cart comes along)."""
+    from backend.mcp.auth import read_guest_token
+    found = read_guest_token(args.get("guest_token")) if args.get("guest_token") else None
+    if found:
+        return pt.trace_id_for(found[0])
+    vid = read_visitor_cart(args.get("visitor_cart"))
+    try:
+        user = optional_customer()
+    except Exception:
+        user = None
+    if user:
+        mine = pt.trace_id_for(user.user_id)
+        if vid:
+            pt.merge(pt.trace_id_for(vid), mine)             # the visitor signed in: one story
+        return mine
+    return pt.trace_id_for(vid) if vid else None
+
+
+class _TraceToolCalls(Middleware):
+    """Records each tools/call Claude makes (request + response summary, status, timing); the
+    services the tool used add their own rows inside it (see protocol_trace)."""
+
+    async def on_call_tool(self, context, call_next):
+        name = getattr(context.message, "name", "?")
+        args = dict(getattr(context.message, "arguments", None) or {})
+        start = time.time()
+        try:
+            token = pt.open_scope(_trace_for_call(args))
+        except Exception:
+            token = pt.open_scope(None)
+        status, response = "success", ""
+        try:
+            result = await call_next(context)
+            data = getattr(result, "structured_content", None)
+            try:                                       # what the model received (a card's data is its text)
+                data = json.loads(result.content[0].text)
+            except Exception:
+                pass
+            response = _result_summary(data)
+            if isinstance(data, dict) and data.get("status") in ("verification_required", "provider_handoff"):
+                status = "pending"
+            return result
+        except Exception as exc:
+            status, response = "failure", str(exc)[:300]
+            raise
+        finally:
+            try:
+                first = pt.event(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, f"tools/call {name}", request=_args_summary(args),
+                                 response=f"{response} ({(time.time() - start) * 1000:.0f} ms)", status=status,
+                                 at=start)
+                pt.close_scope(token, first)
+            except Exception as exc:
+                print(f"[trace] call not recorded: {type(exc).__name__}", flush=True)
 
 
 def _set_approvals() -> None:
@@ -1091,6 +1570,7 @@ def _set_approvals() -> None:
 
 _set_approvals()
 mcp.add_provider(cards)
+mcp.add_middleware(_TraceToolCalls())
 
 
 # Streamable HTTP, stateless: each ChatGPT call is one request, nothing kept per session.

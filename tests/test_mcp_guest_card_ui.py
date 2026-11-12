@@ -329,13 +329,18 @@ def test_a_stale_customer_token_never_turns_guest_checkout_into_a_sign_in(client
             assert r.status_code == 401 and "resource_metadata" in r.headers["www-authenticate"]
 
 
-def test_the_model_path_shows_the_same_guest_form(client):
-    """Asked in the chat ("check out as a guest"), guest_checkout draws the same form."""
+def test_the_model_path_is_a_conversation_and_the_button_path_keeps_the_form(client):
+    """Asked in the chat ("continue as a guest"), guest_checkout answers with data for the
+    conversation (no form card); the cart card's "Check out as guest" button still draws the form."""
     found, _ = card_of(client, "search_shopsphere", query="running shoes", size="10")
     call(client, "add_to_cart", product_id="SSP049", color="White", visitor_cart=found["visitor_cart"])
-    _, structured = card_of(client, "guest_checkout", visitor_cart=found["visitor_cart"])
-    no_chat_messages_or_helper_clashes(structured)
-    _guest_pays_in_the_card(client, CardDriver(client, structured))
+    data, raw = card_of(client, "guest_checkout", visitor_cart=found["visitor_cart"])
+    assert not (raw or {}).get("state") and data["guest_token"] and data["saved_profile"]["available"]
+    _, cart_card = card_of(client, "show_cart", visitor_cart=found["visitor_cart"])
+    ui = CardDriver(client, cart_card)
+    ui.click("Check out as guest")
+    assert ui.tool_calls[-1] == "open_guest_checkout" and ui.sign_in_requests == 0
+    _guest_pays_in_the_card(client, ui)
 
 
 # ── signed in ──────────────────────────────────────────────────────────────────
@@ -419,11 +424,12 @@ def test_claude_asks_only_before_checkout_and_before_paying(client):
     _, msg = rpc(client, "tools/list")
     flags = {t["name"]: (t.get("annotations") or {}) for t in msg["result"]["tools"]}
     ask = {name for name, a in flags.items() if not a.get("readOnlyHint")}
-    assert ask == {"checkout", "open_checkout", "guest_checkout", "open_guest_checkout",
-                   "approve_and_pay", "start_new_card_payment", "start_guest_payment"}
+    assert ask == {"checkout", "open_checkout", "open_guest_checkout",
+                   "approve_and_pay", "start_new_card_payment", "start_guest_payment", "place_order"}
     assert all(flags[n].get("destructiveHint") for n in ("approve_and_pay", "start_new_card_payment",
-                                                          "start_guest_payment"))
+                                                          "start_guest_payment", "place_order"))
     for click in ("search_shopsphere", "add_to_cart", "view_cart", "show_cart", "update_cart_line",
                   "update_checkout_choices", "update_guest_checkout", "order_status", "track_order",
-                  "my_orders", "advance_demo_shipment"):
+                  "my_orders", "advance_demo_shipment", "guest_checkout", "use_guest_profile", "review_order",
+                  "decline_order"):
         assert flags[click]["readOnlyHint"] is True, click
