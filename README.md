@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v5` (also `/mcp`, `/shop`, `/shop/v4`; after new tools are added, connect at the next version, e.g. `/shop/v6`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v6` (also `/mcp`, `/shop`, `/shop/v5`; after new tools are added, connect at the next version, e.g. `/shop/v7`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
 Searching and the cart are open (a visitor cart per chat). At checkout the cart card offers three choices:
@@ -76,15 +76,19 @@ Searching and the cart are open (a visitor cart per chat). At checkout the cart 
    and Chase offers; the visitor cart is merged into the account's cart.
 2. **Create an account** on the same sign-in page (name, email, password, shipping address; never a card). A retry
    with the same email and password signs in to the account already made instead of failing.
-3. **Check out as guest**: no account and no sign-in (`guest_checkout`). The guest types name, email and shipping
-   address on the guest checkout card, pays with a new card on the secure payment page (used once, never saved), gets
+3. **Check out as guest**: no account and no sign-in. The cart card's button calls `open_guest_checkout` directly
+   (no chat turn, so it can't become a sign-in) and the guest checkout opens in the same card; asked in the chat,
+   Claude calls `guest_checkout`, which shows the same form. The guest types name, email and shipping
+   address on the card, pays with a new card on the secure payment page (used once, never saved), gets
    the confirmation email and tracks the order later with `track_order` (Order ID + email; also on the website's
    Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is in the Claude connector only; the
    website still asks visitors to sign in.
 
 Sign-in is OAuth 2.1 + PKCE ([`backend/oauth/server.py`](backend/oauth/server.py); Claude's published identity
 (CIMD) or registration (DCR); signed tokens bound to the exact connector address; one-time codes stored hashed in the
-database, so any server worker can redeem them). A guest is identified by a signed 2-hour token for one guest
+database, so any server worker can redeem them). An expired or wrong token only blocks customer tools (they answer
+401 so Claude refreshes or signs in again); search, cart, guest checkout and tracking carry on as a visitor, with the
+token removed. A guest is identified by a signed 2-hour token for one guest
 checkout ([`backend/shop/guest_checkout.py`](backend/shop/guest_checkout.py)). Paying is only the shopper's own tap
 on the card: those tools are app-only (Claude can't call them), and the backend still checks the exact approved
 version + total and the owner of the checkout. A new card is typed only on the simulated secure payment provider's

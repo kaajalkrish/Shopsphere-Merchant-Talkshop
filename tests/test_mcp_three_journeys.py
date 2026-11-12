@@ -173,7 +173,8 @@ def test_case2_oauth_codes_are_one_time_hashed_expiring_and_bound_to_the_connect
         == "invalid_grant"                                               # replayed
     r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, tok["access_token"], path="/shop/v5")
     assert r.status_code == 200 and not msg["result"].get("isError")    # works at its own address
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, tok["access_token"], path="/shop/v4")
+    r, _ = rpc(client, "tools/call", {"name": "my_shopsphere_account", "arguments": {}}, tok["access_token"],
+               path="/shop/v4")
     assert r.status_code == 401                                          # not at another connector address
     code, verifier = code_for(base)
     with get_session() as db:

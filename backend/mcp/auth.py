@@ -260,11 +260,22 @@ class McpSignIn:
                   if isinstance(c, dict) and c.get("method") == "tools/call"}
         needs_customer = bool(wanted & CUSTOMER_TOOLS)
         methods = sorted({str(c.get("method")) for c in calls if isinstance(c, dict)})
-        if auth and not user_for(auth, base, resource_url(base, path)):
+        valid = bool(auth) and bool(user_for(auth, base, resource_url(base, path)))
+        if auth and not valid:
             claims = _read(auth[7:].strip(), "mcp_access") if auth.lower().startswith("bearer ") else None
-            log_signin("mcp_401_bad_token", path=path, methods=methods, tools=sorted(t for t in wanted if t),
-                       token=("unreadable" if not claims else f"aud={claims.get('aud')}"), expected=resource_url(base, path))
-            return await _challenge(send, base, path)
+            why = "unreadable or expired" if not claims else f"aud={claims.get('aud')}"
+            if needs_customer:                       # a customer tool: sign in (or refresh) first
+                log_signin("mcp_401_bad_token", path=path, methods=methods, tools=sorted(t for t in wanted if t),
+                           token=why, expected=resource_url(base, path))
+                return await _challenge(send, base, path)
+            # Public work (search, cart, guest checkout, tracking): an expired or wrong token must not
+            # turn into a sign-in pop-up. The call goes on as an anonymous visitor, with the token
+            # removed so no tool can read it.
+            log_signin("mcp_bad_token_ignored_for_public_call", path=path, methods=methods,
+                       tools=sorted(t for t in wanted if t), token=why)
+            scope = {**scope, "headers": [(k, v) for k, v in scope.get("headers", [])
+                                          if k.decode("latin-1").lower() != "authorization"]}
+            auth = None
         if needs_customer and not auth:
             log_signin("mcp_401_needs_sign_in", path=path, tools=sorted(t for t in wanted if t))
             return await _challenge(send, base, path)

@@ -32,8 +32,8 @@ from mcp.types import TextContent
 from prefab_ui.actions import OpenLink, SendMessage, SetState, ShowToast
 from prefab_ui.actions.mcp import CallTool
 from prefab_ui.app import PrefabApp
-from prefab_ui.components import (Button, Card, CardContent, CardFooter, Column, Grid, H3, Image, Input, Muted,
-                                  Row, Select, SelectOption, Separator, Text)
+from prefab_ui.components import (Button, Card, CardContent, CardFooter, Column, ForEach, Grid, H3, Image, Input,
+                                  Muted, Row, Select, SelectOption, Separator, Text)
 from prefab_ui.components.control_flow import If
 from prefab_ui.rx import ERROR, RESULT, STATE
 from sqlalchemy.orm import Session
@@ -86,7 +86,9 @@ Buying. The cart needs no sign-in. At checkout the shopper chooses how to buy:
    sign in to their ShopSphere account, create a new account, or check out as a guest.
    - Sign in or create an account: call checkout with visitor_cart. The connector opens
      ShopSphere's sign-in page, which also has "Create an account"; the cart comes along.
-   - Guest: call guest_checkout with visitor_cart. No account and no sign-in. The guest types
+   - Guest: the cart card's "Check out as guest" button opens the guest checkout right on the card.
+     If the shopper asks in the chat to check out as a guest, call guest_checkout with
+     visitor_cart, NEVER checkout (checkout always asks for a sign-in). No account and no sign-in. The guest types
      their name, email and shipping address ON the guest checkout card (never ask for them in the
      chat), then pays with a new card on the secure payment page. If they say they finished
      paying there, call finish_guest_payment with the guest_token.
@@ -504,57 +506,75 @@ def update_cart_line(line_id: str, quantity: int, visitor_cart: Optional[str] = 
 
 
 def _cart_view(cart: dict, cart_id: Optional[str] = None) -> tuple[Column, dict]:
-    extra = {"visitor_cart": cart_id} if cart_id else {}
-    state: dict = {}
+    """The cart card. For a visitor it also holds the guest checkout, hidden until "Check out as
+    guest" (a direct tool call, no chat turn) fills it in and shows it in place of the cart."""
+    guest_ok = bool(cart_id and cart["lines"])
+    state: dict = _guest_card_state() if guest_ok else {}
     with Column(gap=3) as view:
-        H3("Your ShopSphere cart")
-        if not cart["lines"]:
-            Muted("Your cart is empty. Ask me to find something!")
-        for i, ln in enumerate(cart["lines"]):
-            q, gone = f"q{i}", f"gone{i}"
-            state[q], state[gone] = ln["quantity"], False
-            with If(~getattr(STATE, gone)):
-                with Card():
-                    with CardContent(), Row(gap=3, align="center"):
-                        photo = _photo(ln.get("image_url"), 96)
-                        if photo:
-                            Image(src=photo, alt=ln["name"], css_class="w-16 h-16 object-contain bg-white")
-                        with Column(gap=1, css_class="flex-1"):
-                            Text(ln["name"], css_class="font-medium")
-                            Muted(" · ".join(x for x in (_variant_label(ln.get("size"), ln.get("color")),
-                                                             _money(ln["unit_price"]) + " each") if x))
-                            if not ln.get("in_stock", True):
-                                Muted("Out of stock: remove it to check out.")
-                        with Row(gap=2, align="center"):
-                            Button("−", variant="outline", size="sm", on_click=CallTool(
-                                "update_cart_line", arguments={"line_id": ln["line_id"],
-                                                               "quantity": getattr(STATE, q) - 1, **extra},
-                                onSuccess=SetState(q, getattr(STATE, q) - 1), onError=_failed_toast()))
-                            Text(f"{getattr(STATE, q)}", css_class="font-medium")
-                            Button("+", variant="outline", size="sm", on_click=CallTool(
-                                "update_cart_line", arguments={"line_id": ln["line_id"],
-                                                               "quantity": getattr(STATE, q) + 1, **extra},
-                                onSuccess=SetState(q, getattr(STATE, q) + 1), onError=_failed_toast()))
-                            Button("Remove", variant="ghost", size="sm", on_click=CallTool(
-                                "update_cart_line", arguments={"line_id": ln["line_id"], "quantity": 0, **extra},
-                                onSuccess=SetState(gone, True), onError=_failed_toast()))
-        if cart["lines"]:
-            Muted(f"Subtotal when shown: {_money(cart['subtotal'])}. Offers, points, delivery and tax are "
-                  "added at checkout.")
-            if cart_id:
-                Text("How would you like to check out?", css_class="font-medium")
-                Muted("Sign in to your ShopSphere account, create one (your cart comes with you), or check "
-                      "out as a guest with no account.")
-                with Row(gap=2, css_class="flex-wrap"):
-                    Button("Sign in & check out", on_click=SendMessage(
-                        f"Sign in to ShopSphere and check out my cart (visitor_cart {cart_id})."))
-                    Button("Create account & check out", variant="outline", on_click=SendMessage(
-                        f"Create a ShopSphere account and check out my cart (visitor_cart {cart_id})."))
-                    Button("Check out as guest", variant="secondary", on_click=SendMessage(
-                        f"Check out my ShopSphere cart as a guest (visitor_cart {cart_id})."))
-            else:
-                Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."))
+        if guest_ok:
+            with If(~STATE.guest_open):
+                _cart_body(cart, cart_id, state)
+            with If(STATE.guest_open):
+                _guest_section()
+        else:
+            _cart_body(cart, cart_id, state)
     return view, state
+
+
+def _cart_body(cart: dict, cart_id: Optional[str], state: dict) -> None:
+    extra = {"visitor_cart": cart_id} if cart_id else {}
+    H3("Your ShopSphere cart")
+    if not cart["lines"]:
+        Muted("Your cart is empty. Ask me to find something!")
+    for i, ln in enumerate(cart["lines"]):
+        q, gone = f"q{i}", f"gone{i}"
+        state[q], state[gone] = ln["quantity"], False
+        with If(~getattr(STATE, gone)):
+            with Card():
+                with CardContent(), Row(gap=3, align="center"):
+                    photo = _photo(ln.get("image_url"), 96)
+                    if photo:
+                        Image(src=photo, alt=ln["name"], css_class="w-16 h-16 object-contain bg-white")
+                    with Column(gap=1, css_class="flex-1"):
+                        Text(ln["name"], css_class="font-medium")
+                        Muted(" · ".join(x for x in (_variant_label(ln.get("size"), ln.get("color")),
+                                                         _money(ln["unit_price"]) + " each") if x))
+                        if not ln.get("in_stock", True):
+                            Muted("Out of stock: remove it to check out.")
+                    with Row(gap=2, align="center"):
+                        Button("−", variant="outline", size="sm", on_click=CallTool(
+                            "update_cart_line", arguments={"line_id": ln["line_id"],
+                                                           "quantity": getattr(STATE, q) - 1, **extra},
+                            onSuccess=SetState(q, getattr(STATE, q) - 1), onError=_failed_toast()))
+                        Text(f"{getattr(STATE, q)}", css_class="font-medium")
+                        Button("+", variant="outline", size="sm", on_click=CallTool(
+                            "update_cart_line", arguments={"line_id": ln["line_id"],
+                                                           "quantity": getattr(STATE, q) + 1, **extra},
+                            onSuccess=SetState(q, getattr(STATE, q) + 1), onError=_failed_toast()))
+                        Button("Remove", variant="ghost", size="sm", on_click=CallTool(
+                            "update_cart_line", arguments={"line_id": ln["line_id"], "quantity": 0, **extra},
+                            onSuccess=SetState(gone, True), onError=_failed_toast()))
+    if cart["lines"]:
+        Muted(f"Subtotal when shown: {_money(cart['subtotal'])}. Offers, points, delivery and tax are "
+              "added at checkout.")
+        if cart_id:
+            Text("How would you like to check out?", css_class="font-medium")
+            Muted("Sign in to your ShopSphere account, create one (your cart comes with you), or check "
+                  "out as a guest with no account.")
+            with Row(gap=2, css_class="flex-wrap"):
+                Button("Sign in & check out", on_click=SendMessage(
+                    f"Sign in to ShopSphere and check out my cart (visitor_cart {cart_id})."))
+                Button("Create account & check out", variant="outline", on_click=SendMessage(
+                    f"Create a ShopSphere account and check out my cart (visitor_cart {cart_id})."))
+                # Straight to ShopSphere (no chat turn, so it can never become a sign-in): the guest
+                # checkout opens right here in this card.
+                Button("Check out as guest", variant="secondary", on_click=CallTool(
+                    "open_guest_checkout", arguments={"visitor_cart": cart_id},
+                    onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _GUEST_OPENED),
+                               SetState("guest_open", True)],
+                    onError=_failed_toast("Couldn't start guest checkout")))
+        else:
+            Button("Checkout", on_click=SendMessage("Check out my ShopSphere cart."))
 
 
 @cards.ui(annotations=READ_ONLY)
@@ -981,109 +1001,128 @@ def _guest_state(co: dict) -> dict:
         "contact": f"Confirmation email to: {_mask_email(guest.get('email'))}" if guest.get("email") else "",
         "payable": bool(co.get("ready")) and (co.get("payment_path") or {}).get("route") == "provider_handoff",
         "problem": " ".join(i.get("message") or f"{i.get('name') or 'Item'}: {i.get('code')}" for i in problems),
+        "lines": [{"label": f"{ln['name']} ({_variant_label(ln.get('size'), ln.get('color'))}) × {ln['quantity']}",
+                   "amount": _money(ln["unit_price"] * ln["quantity"])} for ln in co.get("lines") or []],
     }
 
 
 _GUEST_REFRESHED = ("version", "total", "total_text", "subtotal_text", "tax_text", "delivery_label", "shipping_text",
-                    "arrives", "has_details", "ship_to", "contact", "payable", "problem")
+                    "arrives", "has_details", "ship_to", "contact", "payable", "problem", "lines")
+# What opening a guest checkout puts on the card: the refreshed values plus the checkout itself.
+_GUEST_OPENED = (*_GUEST_REFRESHED, "guest_token", "checkout_id", "pay_currency", "delivery")  # (STATE.currency is a Prefab helper)
 _GUEST_FIELDS = {"g_name": "full_name", "g_email": "email", "g_line1": "line1", "g_line2": "line2",
                  "g_city": "city", "g_state": "state", "g_zip": "postal_code"}
 
 
-def _guest_view(co: dict, token: str) -> tuple[Column, dict]:
-    """Guest checkout card: items and totals, the guest's own details form (typed here, sent
-    straight to ShopSphere), delivery, then Approve & pay -> secure payment page -> confirmation."""
-    st = _guest_state(co)
-    dl = co.get("delivery") or {}
-    state = {**st, "paid": False, "order_ref": "", "handing_off": False, "hosted_url": "", "session_id": "",
-             "sent_to": "", "email_note": "", "delivery": dl.get("method") or "standard",
-             **{k: "" for k in _GUEST_FIELDS}}
+def _guest_card_state(co: Optional[dict] = None, token: str = "") -> dict:
+    """The guest section's starting state: a guest checkout's values, or empty placeholders (the
+    cart card, until "Check out as guest" fills them in from open_guest_checkout)."""
+    st = _guest_state(co) if co else {
+        "checkout_id": "", "version": 0, "total": 0.0, "currency": "USD", "total_text": "", "subtotal_text": "",
+        "tax_text": "", "delivery_label": "", "shipping_text": "", "arrives": "", "has_details": False,
+        "ship_to": "", "contact": "", "payable": False, "problem": "", "lines": []}
+    return {**st, "guest_open": bool(co), "guest_token": token, "pay_currency": st["currency"],
+            "delivery": ((co or {}).get("delivery") or {}).get("method") or "standard",
+            "paid": False, "order_ref": "", "handing_off": False, "hosted_url": "", "session_id": "",
+            "sent_to": "", "email_note": "", **{k: "" for k in _GUEST_FIELDS}}
+
+
+def _guest_section() -> None:
+    """The guest checkout, drawn entirely from card state, so the cart card can open it in place
+    with no chat turn in between: items and totals, the guest's own details form (typed here, sent
+    straight to ShopSphere), delivery, then Approve & pay -> secure payment page -> confirmation.
+    Every button calls its tool directly with the guest token from state; nothing goes via the model."""
     S = STATE
-    with Column(gap=3) as view:
-        H3("Guest checkout at ShopSphere")
-        Muted("No account needed. Your details are used for this order only.")
-        with Card():
-            with CardContent(), Column(gap=2):
-                for ln in co["lines"]:
-                    with Row(gap=2, css_class="justify-between"):
-                        Text(f"{ln['name']} ({_variant_label(ln.get('size'), ln.get('color'))}) × {ln['quantity']}")
-                        Text(_money(ln["unit_price"] * ln["quantity"]))
-                Separator()
-                for label, key in (("Subtotal", "subtotal_text"), (None, "shipping_text"), ("Tax", "tax_text")):
-                    with Row(gap=2, css_class="justify-between"):
-                        Muted(label if label else f"{S.delivery_label}")
-                        Muted(f"{getattr(S, key)}")
+    H3("Guest checkout at ShopSphere")
+    Muted("No account needed. Your details are used for this order only.")
+    with Card():
+        with CardContent(), Column(gap=2):
+            with ForEach("lines") as ln:
                 with Row(gap=2, css_class="justify-between"):
-                    Text("Total", css_class="font-semibold")
-                    Text(f"{S.total_text}", css_class="font-semibold")
-                Muted(f"{S.ship_to}")
-                with If(S.contact):
-                    Muted(f"{S.contact}")
-                Muted("Pay with: a new card on the secure payment page (used once, not saved)")
-                with If(~S.paid):
-                    Separator()
-                    Text("Your details", css_class="font-medium")
-                    with Grid(columns={"default": 1, "sm": 2}, gap=2):
-                        Input(name="g_name", placeholder="Full name", max_length=80, aria_label="Full name")
-                        Input(name="g_email", input_type="email", placeholder="Email (for your confirmation)",
-                              max_length=255, aria_label="Email")
-                        Input(name="g_line1", placeholder="Street address", max_length=120, aria_label="Street address")
-                        Input(name="g_line2", placeholder="Apt, suite (optional)", max_length=120,
-                              aria_label="Apartment or suite")
-                        Input(name="g_city", placeholder="City", max_length=80, aria_label="City")
-                        Input(name="g_state", placeholder="State, e.g. TX", max_length=2, aria_label="State")
-                        Input(name="g_zip", placeholder="ZIP code", max_length=10, aria_label="ZIP code")
-                        with Select(name="delivery", value=state["delivery"], size="sm"):
-                            for o in dl.get("options") or []:
-                                SelectOption(value=o["method"], label=f"{o['label']} delivery, arrives {o['date']}"
-                                             + (f" (+{_money(o['price'])})" if o.get("price") else " (free)"))
-                    Button("Save details & update total", variant="outline", size="sm", on_click=CallTool(
-                        "update_guest_checkout", arguments={
-                            "guest_token": token, "delivery": S.delivery,
-                            **{arg: getattr(S, k) for k, arg in _GUEST_FIELDS.items()}},
-                        onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _GUEST_REFRESHED),
-                                   ShowToast("Details saved", variant="success")],
-                        onError=_failed_toast("Please check your details")))
-                    Muted("Your name, email and address go straight to ShopSphere for this order; no account is "
-                          "created. Card details go only on the secure payment page, never in the chat.")
-            with CardFooter(), Column(gap=2):
-                with If(~S.payable), If(~S.paid):
-                    Muted(f"{S.problem}")
-                with If(S.payable), If(~S.paid):
-                    with If(~S.handing_off):
-                        Button(f"Approve & pay {S.total_text}", on_click=CallTool(
-                            "start_guest_payment", arguments={
-                                "guest_token": token, "checkout_version": S.version, "final_amount": S.total,
-                                "currency": state["currency"]},
-                            onSuccess=[SetState("hosted_url", RESULT.hosted_url),
-                                       SetState("session_id", RESULT.payment_session_id),
-                                       SetState("handing_off", True), OpenLink(RESULT.hosted_url)],
-                            onError=_failed_toast("Couldn't open the secure payment page")))
-                        Muted("Next you enter your card on the secure payment page (simulated provider, test cards "
-                              "only). Claude never sees it. Nothing is charged until you finish there.")
-                    with If(S.handing_off):
-                        Text("Finish on the secure payment page", css_class="font-medium")
-                        Muted("It opened in a new browser tab. Enter the card there, then come back here.")
-                        with Row(gap=2):
-                            Button("Open secure payment page", variant="outline", on_click=OpenLink(S.hosted_url))
-                            Button("I've finished paying", variant="success", on_click=CallTool(
-                                "finish_guest_payment", arguments={"guest_token": token,
-                                                                   "payment_session_id": S.session_id},
-                                onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
-                                           SetState("sent_to", RESULT.sent_to), SetState("arrives", RESULT.arrives),
-                                           SetState("email_note", RESULT.email_note),
-                                           ShowToast("Payment approved", variant="success")],
-                                onError=_failed_toast("Not finished yet")))
-                with If(S.paid):
-                    Text("✓ Your ShopSphere order has been placed", css_class="font-semibold")
-                    Text(f"Order ID: {S.order_ref}", css_class="font-medium")
-                    Muted(f"Confirmation sent to: {S.sent_to}")
-                    Muted(f"Estimated delivery: {S.arrives}")
-                    Muted(f"{S.email_note}")
-                    Muted("You can track your order using your Order ID and email address.")
-                    Button("Track my order", variant="outline", size="sm",
-                           on_click=SendMessage(f"Track my ShopSphere order {S.order_ref}."))
-    return view, state
+                    Text(f"{ln.label}")
+                    Text(f"{ln.amount}")
+            Separator()
+            for label, key in (("Subtotal", "subtotal_text"), (None, "shipping_text"), ("Tax", "tax_text")):
+                with Row(gap=2, css_class="justify-between"):
+                    Muted(label if label else f"{S.delivery_label}")
+                    Muted(f"{getattr(S, key)}")
+            with Row(gap=2, css_class="justify-between"):
+                Text("Total", css_class="font-semibold")
+                Text(f"{S.total_text}", css_class="font-semibold")
+            Muted(f"{S.ship_to}")
+            with If(S.contact):
+                Muted(f"{S.contact}")
+            Muted("Pay with: a new card on the secure payment page (used once, not saved)")
+            with If(~S.paid):
+                Separator()
+                Text("Your details", css_class="font-medium")
+                with Grid(columns={"default": 1, "sm": 2}, gap=2):
+                    Input(name="g_name", placeholder="Full name", max_length=80, aria_label="Full name")
+                    Input(name="g_email", input_type="email", placeholder="Email (for your confirmation)",
+                          max_length=255, aria_label="Email")
+                    Input(name="g_line1", placeholder="Street address", max_length=120, aria_label="Street address")
+                    Input(name="g_line2", placeholder="Apt, suite (optional)", max_length=120,
+                          aria_label="Apartment or suite")
+                    Input(name="g_city", placeholder="City", max_length=80, aria_label="City")
+                    Input(name="g_state", placeholder="State, e.g. TX", max_length=2, aria_label="State")
+                    Input(name="g_zip", placeholder="ZIP code", max_length=10, aria_label="ZIP code")
+                    with Select(name="delivery", value="standard", size="sm"):
+                        SelectOption(value="standard", label="Standard delivery (free)")
+                        SelectOption(value="express",
+                                     label=f"Express delivery (+{_money(checkout_service.EXPRESS_PRICE)})")
+                Button("Save details & update total", variant="outline", size="sm", on_click=CallTool(
+                    "update_guest_checkout", arguments={
+                        "guest_token": S.guest_token, "delivery": S.delivery,
+                        **{arg: getattr(S, k) for k, arg in _GUEST_FIELDS.items()}},
+                    onSuccess=[*(SetState(k, getattr(RESULT, k)) for k in _GUEST_REFRESHED),
+                               ShowToast("Details saved", variant="success")],
+                    onError=_failed_toast("Please check your details")))
+                Muted("Your name, email and address go straight to ShopSphere for this order; no account is "
+                      "created. Card details go only on the secure payment page, never in the chat.")
+        with CardFooter(), Column(gap=2):
+            with If(~S.payable), If(~S.paid):
+                Muted(f"{S.problem}")
+            with If(S.payable), If(~S.paid):
+                with If(~S.handing_off):
+                    Button(f"Approve & pay {S.total_text}", on_click=CallTool(
+                        "start_guest_payment", arguments={
+                            "guest_token": S.guest_token, "checkout_version": S.version, "final_amount": S.total,
+                            "currency": S.pay_currency},
+                        onSuccess=[SetState("hosted_url", RESULT.hosted_url),
+                                   SetState("session_id", RESULT.payment_session_id),
+                                   SetState("handing_off", True), OpenLink(RESULT.hosted_url)],
+                        onError=_failed_toast("Couldn't open the secure payment page")))
+                    Muted("Next you enter your card on the secure payment page (simulated provider, test cards "
+                          "only). Claude never sees it. Nothing is charged until you finish there.")
+                with If(S.handing_off):
+                    Text("Finish on the secure payment page", css_class="font-medium")
+                    Muted("It opened in a new browser tab. Enter the card there, then come back here.")
+                    with Row(gap=2):
+                        Button("Open secure payment page", variant="outline", on_click=OpenLink(S.hosted_url))
+                        Button("I've finished paying", variant="success", on_click=CallTool(
+                            "finish_guest_payment", arguments={"guest_token": S.guest_token,
+                                                               "payment_session_id": S.session_id},
+                            onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
+                                       SetState("sent_to", RESULT.sent_to), SetState("arrives", RESULT.arrives),
+                                       SetState("email_note", RESULT.email_note),
+                                       ShowToast("Payment approved", variant="success")],
+                            onError=_failed_toast("Not finished yet")))
+            with If(S.paid):
+                Text("✓ Your ShopSphere order has been placed", css_class="font-semibold")
+                Text(f"Order ID: {S.order_ref}", css_class="font-medium")
+                Muted(f"Confirmation sent to: {S.sent_to}")
+                Muted(f"Estimated delivery: {S.arrives}")
+                Muted(f"{S.email_note}")
+                Muted("You can track your order using your Order ID and email address.")
+                Button("Track my order", variant="outline", size="sm",
+                       on_click=SendMessage(f"Track my ShopSphere order {S.order_ref}."))
+
+
+def _guest_view(co: dict, token: str) -> tuple[Column, dict]:
+    """The guest checkout card (guest_checkout): the shared guest section, already open."""
+    with Column(gap=3) as view:
+        _guest_section()
+    return view, _guest_card_state(co, token)
 
 
 def _guest(token: Optional[str]):
@@ -1092,6 +1131,32 @@ def _guest(token: Optional[str]):
             return guest_service.load(db, token)
         except CheckoutError as exc:
             raise ToolError(exc.message)
+
+
+def _start_guest(visitor_cart: Optional[str], line_ids: Optional[list[str]] = None,
+                 delivery: Optional[str] = None) -> tuple[dict, str]:
+    """A guest checkout for this chat's visitor cart: (checkout snapshot, guest token). Used by
+    guest_checkout (asked in the chat) and open_guest_checkout (the cart card's guest button)."""
+    if optional_customer():                        # a valid sign-in: their own account checkout applies
+        raise ToolError("You're signed in to ShopSphere, so use checkout: your saved details apply.")
+    vid = read_visitor_cart(visitor_cart)
+    if not vid:
+        raise ToolError("I couldn't find this chat's cart. Show the cart (or add the items) first.")
+    with Session(get_engine()) as db:
+        try:
+            return guest_service.start(db, vid, line_ids, delivery)
+        except CheckoutError as exc:
+            raise ToolError(exc.message)
+
+
+@cards.tool()
+def open_guest_checkout(visitor_cart: str) -> dict:
+    """App-only: the cart card's "Check out as guest" button. Starts the guest checkout for this
+    chat's visitor cart (the same one guest_checkout starts) and returns what the card needs to show
+    the guest form in place, with no sign-in and no chat turn. Nothing is charged."""
+    co, token = _start_guest(visitor_cart)
+    state = _guest_card_state(co, token)
+    return {k: state[k] for k in _GUEST_OPENED}
 
 
 @cards.ui(annotations=WRITE)
@@ -1108,16 +1173,7 @@ def guest_checkout(visitor_cart: str, line_ids: Optional[list[str]] = None,
         line_ids: optional cart line ids to buy (from show_cart); default: the whole cart.
         delivery: optional "standard" or "express".
     """
-    if optional_customer():
-        raise ToolError("You're signed in to ShopSphere, so use checkout: your saved details apply.")
-    vid = read_visitor_cart(visitor_cart)
-    if not vid:
-        raise ToolError("I couldn't find this chat's cart. Show the cart (or add the items) first.")
-    with Session(get_engine()) as db:
-        try:
-            co, token = guest_service.start(db, vid, line_ids, delivery)
-        except CheckoutError as exc:
-            raise ToolError(exc.message)
+    co, token = _start_guest(visitor_cart, line_ids, delivery)
     view, state = _guest_view(co, token)
     data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "shipping", "tax", "total",
                                    "currency")}

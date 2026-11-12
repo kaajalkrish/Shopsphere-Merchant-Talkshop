@@ -92,8 +92,10 @@ def test_search_and_cart_are_open_and_checkout_asks_for_sign_in(client):
     assert r.status_code == 401
     assert 'resource_metadata="' in r.headers["www-authenticate"]
     assert "/.well-known/oauth-protected-resource/mcp" in r.headers["www-authenticate"]
-    r, _ = rpc(client, "tools/list", token="not-a-real-token")
-    assert r.status_code == 401                                                 # a bad token is never ignored
+    r, _ = rpc(client, "tools/call", {"name": "my_orders", "arguments": {}}, token="not-a-real-token")
+    assert r.status_code == 401                                 # a bad token never reaches a customer tool
+    r, msg = rpc(client, "tools/list", token="not-a-real-token")
+    assert r.status_code == 200                                 # public work goes on as a visitor (no sign-in pop-up)
 
 
 def test_wrong_pkce_and_reused_codes_are_refused(client):
@@ -115,8 +117,10 @@ def test_wrong_pkce_and_reused_codes_are_refused(client):
 
 def test_token_for_another_server_is_refused(client):
     stray = mcp_auth.issue_tokens("USR001", "x", "https://some-other-server.example/mcp")["access_token"]
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, stray)
+    r, _ = rpc(client, "tools/call", {"name": "my_shopsphere_account", "arguments": {}}, stray)
     assert r.status_code == 401
+    r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, stray)
+    assert r.status_code == 200 and json.loads(msg["result"]["content"][0]["text"])["item_count"] == 0   # a visitor, not USR001
 
 
 def test_claude_published_identity_cimd(client, monkeypatch):
@@ -195,7 +199,7 @@ def test_the_fresh_shop_address_is_the_same_connector(client):
     r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop")
     assert r.status_code == 200 and not msg["result"].get("isError")
     stray = mcp_auth.issue_tokens("USR001", "x", "https://elsewhere.example/shop")["access_token"]
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, stray, path="/shop")
+    r, _ = rpc(client, "tools/call", {"name": "my_shopsphere_account", "arguments": {}}, stray, path="/shop")
     assert r.status_code == 401
 
 
@@ -263,7 +267,7 @@ def test_versioned_addresses_are_the_same_connector(client):
     token = sign_in(client, "chris@shopsphere.demo", resource=meta["resource"])
     r, msg = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop/v2")
     assert r.status_code == 200 and not msg["result"].get("isError")
-    r, _ = rpc(client, "tools/call", {"name": "show_cart", "arguments": {}}, token, path="/shop/v3")
+    r, _ = rpc(client, "tools/call", {"name": "my_shopsphere_account", "arguments": {}}, token, path="/shop/v3")
     assert r.status_code == 401                       # a token is for the address it was issued to
 
 
