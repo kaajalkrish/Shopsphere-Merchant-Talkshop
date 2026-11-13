@@ -1,5 +1,5 @@
 """
-Builds data/shopsphere_catalog.json, the ShopSphere Demo 1 catalog (60 products).
+Builds data/shopsphere_catalog.json, the ShopSphere Demo 1 catalog (66 products, 6 of them kids').
 
     python scripts/build_shopsphere_catalog.py
 
@@ -264,6 +264,36 @@ add("SSP060", "Sphere Sound Mini", "Sphere Tech", "electronics", "electronics", 
     "one_size", col("Grey", "Blue"),
     "A palm-sized Bluetooth speaker with 12-hour battery.", ["speaker", "bluetooth", "portable", "budget"], "small speaker")
 
+
+# ── KIDS (6) ──────────────────────────────────────────────────────────────────
+# A small kids' section (gender "kids"): fictional house brands, kids' sizing (C = little kids,
+# Y = big kids; clothing by age). No photos yet: the cards and pages show the product without one
+# until a hand-picked photo is added to CURATION (then run scripts/fetch_catalog_photos.py).
+add("SSP061", "Kinetic Junior Runner", "Kinetic", "shoes", "running_shoes", "running", "kids", 59.99, 4.6, 412, 3, True,
+    "shoe_kids", col("Blue", "Pink", "Black"),
+    "A light, cushioned kids' running shoe with a hook-and-loop strap and a grippy rubber sole for school and play.",
+    ["kids", "boys", "girls", "running", "easy on", "school"], "kids running shoe")
+add("SSP062", "Northpace Kids Trail Scout", "Northpace", "shoes", "running_shoes", "trail", "kids", 54.99, 4.5, 238, 4, False,
+    "shoe_kids", col("Green", "Navy"),
+    "A sturdy kids' trail shoe with toe protection and deep lugs for parks, trails and muddy days.",
+    ["kids", "boys", "girls", "trail", "outdoor", "durable"], "kids trail shoe")
+add("SSP063", "Sphere Kids Light-Up Sneaker", "Sphere", "shoes", "sneakers", "sneakers", "kids", 44.99, 4.7, 655, 3, True,
+    "shoe_kids", col("White", "Pink", "Black"),
+    "A canvas kids' sneaker with a light-up sole and an elastic lace so little ones can slip it on themselves.",
+    ["kids", "boys", "girls", "light-up", "casual", "slip-on"], "kids sneaker")
+add("SSP064", "Kids Graphic Crew Tee", "Sphere Basics", "clothing", "clothing", "tops", "kids", 16.99, 4.4, 321, 3, False,
+    "apparel_kids", col("Yellow", "Blue", "Red"),
+    "A soft cotton crew-neck tee with a playful print, made to survive the wash.",
+    ["kids", "boys", "girls", "cotton", "t-shirt", "everyday"], "kids t-shirt")
+add("SSP065", "Kids Zip Fleece Hoodie", "Northpace", "clothing", "clothing", "tops", "kids", 29.99, 4.6, 289, 4, True,
+    "apparel_kids", col("Navy", "Purple", "Grey"),
+    "A warm brushed-fleece hoodie with a full zip and pockets, for chilly mornings and the playground.",
+    ["kids", "boys", "girls", "fleece", "hoodie", "warm"], "kids hoodie")
+add("SSP066", "Kids School Backpack", "Sphere", "accessories", "bags", "bags", "kids", 34.99, 4.5, 207, 3, False,
+    "one_size", col("Blue", "Pink", "Green"),
+    "A light 15-litre school backpack with padded straps, a water-bottle pocket and reflective trim.",
+    ["kids", "boys", "girls", "school", "backpack", "lightweight"], "kids backpack")
+
 CURATION = {'SSP001': {'colors': [['Black', {'pixabay_id': 115151, 'mode': 'largest'}],
                        ['White', {'pixabay_id': 77085, 'mode': 'studio'}],
                        ['Blue', {'pixabay_id': 5351339, 'mode': 'studio'}]]},
@@ -484,6 +514,10 @@ CURATION = {'SSP001': {'colors': [['Black', {'pixabay_id': 115151, 'mode': 'larg
  'SSP060': {'colors': [['Blue', {'pixabay_id': 2557531, 'mode': 'studio'}],
                        ['Pink', {'pixabay_id': 2557528, 'mode': 'studio'}]]}}
 
+# Kids' products: no hand-picked photo yet (photo None: shown without a photo).
+CURATION.update({pid: {"colors": [[c["name"], None] for c in next(p for p in P if p["product_id"] == pid)["colors"]]}
+                 for pid in ("SSP061", "SSP062", "SSP063", "SSP064", "SSP065", "SSP066")})
+
 EXTRA_COLORS = {'Peach': '#f2b28c', 'Teal': '#2bb3b1', 'Coral': '#f26b5b', 'Lilac': '#b7a3d8', 'Rose': '#b5838d', 'Graphite': '#4a4d52'}
 C.update(EXTRA_COLORS)
 
@@ -503,6 +537,8 @@ catalog = {
         "shoe_unisex": ["6", "7", "8", "9", "10", "11", "12"],
         "shoe_men": ["7", "8", "9", "10", "11", "12", "13"],
         "shoe_women": ["5", "6", "7", "8", "9", "10"],
+        "shoe_kids": ["11C", "12C", "13C", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y"],
+        "apparel_kids": ["4", "5", "6", "7", "8", "10", "12", "14"],
         "apparel_women": ["XS", "S", "M", "L", "XL"],
         "apparel_men": ["S", "M", "L", "XL", "XXL"],
         "apparel_unisex": ["XS", "S", "M", "L", "XL", "XXL"],
@@ -519,8 +555,8 @@ catalog = {
     "products": P,
 }
 
-assert len(P) == 60
-assert len({p["product_id"] for p in P}) == 60 and len({p["slug"] for p in P}) == 60
+assert len(P) == 66
+assert len({p["product_id"] for p in P}) == 66 and len({p["slug"] for p in P}) == 66
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent / "data" / "shopsphere_catalog.json"
@@ -532,4 +568,4 @@ variants = sum(len(catalog["size_ranges"][p["sizes"]]) * len(p["colors"]) for p 
 print("variants:", variants, "| colour photos needed:", sum(len(p["colors"]) for p in P))
 print("genders:", dict(collections.Counter(p["gender"] for p in P)))
 real = {"Nike", "Adidas", "Converse", "Levi's", "Ray-Ban", "Sony", "Bose", "Apple", "Samsung", "Garmin", "JBL"}
-print("real-brand products:", sum(p["brand"] in real for p in P), "/ 60")
+print("real-brand products:", sum(p["brand"] in real for p in P), f"/ {len(P)}")

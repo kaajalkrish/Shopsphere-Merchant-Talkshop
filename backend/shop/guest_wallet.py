@@ -85,7 +85,7 @@ def payment_methods(db: Session, visitor_id: str, profile: dict) -> list[Payment
         return have
     for i, p in enumerate(profile["payment_methods"]):
         db.add(PaymentMethod(
-            payment_method_id=f"sbx_{secrets.token_hex(6)}", user_id=visitor_id,
+            payment_method_id=f"sbx_{secrets.choice('abcdef')}{secrets.token_hex(5)}", user_id=visitor_id,
             brand=cards.network_display(cards.normalize_network(p["network"])), issuer=None, status="active",
             source=SOURCE, last4=str(p["last4"]), exp_month=int(p.get("exp_month") or 12),
             exp_year=int(p.get("exp_year") or 2030), cardholder_name=profile["contact"]["full_name"],

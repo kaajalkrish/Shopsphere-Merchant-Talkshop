@@ -56,7 +56,8 @@ from backend.mcp import card_sections as screens
 from backend.mcp.auth import (current_customer, issue_purchase_authorization, issue_step_up, optional_customer,
                               public_base_url, read_purchase_authorization, read_visitor_cart, visitor_cart_id)
 from backend.observability import protocol_trace as pt
-from backend.shop import agent_profile, card_approval, notifications, offer_preview, payment_routing, profile,     purchase_consent, ratelimit
+from backend.shop import agent_profile, card_approval, discovery, notifications, offer_preview, payment_routing, \
+    profile, purchase_consent, ratelimit
 from backend.shop.purchase_consent import ConsentError
 from backend.shop import cart as cart_service
 from backend.shop import guest_checkout as guest_service
@@ -77,11 +78,23 @@ Talkshop assistant. Shopping is ONE continuous conversation: the shopper says wh
 questions, changes their mind and authorizes the purchase; you do the rest with these tools. Cards
 with buttons appear too; they're optional shortcuts, never required.
 
-Finding products (ShopSphere first, always):
-1. For any shopping request call search_shopsphere BEFORE anything else, including web search.
-   Below the cards, briefly recommend ONLY those ShopSphere products (name, price, colours in the
-   requested size, one line on why each fits). If found=false, say so in one line, then search the
-   web yourself and label those results as other stores, never as ShopSphere products.
+Be a good shopkeeper, not a search box:
+1. When the shopper asks for something broad ("running shoes", "a gift for my son", "headphones"),
+   call get_shopping_questions with their words (and anything they've told you) BEFORE searching.
+   Ask its first one or two questions in ONE short, friendly message ("Happy to help! Who are they
+   for, and mostly road or trail?"), offering its options in words. Never ask about something
+   already understood, never offer an option it didn't list, and stop after about three rounds.
+   Call it again after each answer (pass for_whom/use/size/color/max_price as answered). When it says
+   ready_to_search, or the shopper says "just show me", call search_shopsphere with its search_args.
+   A specific request ("Nike running shoes, men's size 10, black, under $150") goes straight to
+   search_shopsphere. ShopSphere first, always: search it BEFORE any web search.
+   Recommend the best 2-3 below the cards like a shopkeeper: name, price, one line on why it fits
+   what they told you, then ask "Shall I add the <name> in size <x>, <colour> to your cart?". If
+   found=false, say so in one line, then search the web yourself and label those results as other
+   stores, never as ShopSphere products.
+   Kids: ShopSphere has a small kids' section (gender "kids": kids' running shoes, a trail shoe, a
+   light-up sneaker, a tee, a fleece hoodie, a school backpack; sizes 11C-6Y for shoes, 4-14 for
+   clothes). "For my son/daughter" may be a child or an adult: ask (get_shopping_questions does).
 2. Never invent products, prices, sizes, stock, features, reviews, discounts or delivery dates: use
    only what the tools return. Remember which product is "the first one", "the black one" etc. and
    the visitor_cart id; don't ask again for things the shopper already told you (size, colour,
@@ -95,6 +108,7 @@ The cart (no sign-in needed):
 4. "Add the black one in size 10": add_to_cart(product_id, size, color, quantity). Confirm the item,
    real price and delivery estimate. Pass the visitor_cart from earlier results to every later
    call in this chat (search, product, cart, offers, checkout, guest_checkout).
+   Then ask one question that moves things on: "Ready to check out, or keep looking?".
    "Make it two", "remove it", "change it to black", "size 10.5 instead": update_cart_item(line_id…).
    "What's my total so far?": preview_cart_discounts (subtotal + possible discounts, no checkout) or
    show_cart for the card. "Buy just the first item": use line_ids=[that line_id] at checkout.
@@ -238,6 +252,8 @@ def find_products(query: str, category: Optional[str] = None, size: Optional[str
                                                  gender=gender, color=color, limit=12)
     picks = []
     for p in res["products"]:
+        if p.get("gender") == "kids" and gender != "kids":
+            continue                                       # kids' sizes only when the shopper asks for kids
         if not cat and not _mentions(p, query):
             continue                                       # no padding with unrelated products
         avail = talkshop_tools.check_variant(p["product_id"], size=size)
@@ -263,7 +279,9 @@ def find_products(query: str, category: Optional[str] = None, size: Optional[str
     return {
         "store": "ShopSphere", "found": found, "query": query, "size": size, "products": picks,
         "notes": notes,
-        "next_step": ("Recommend these ShopSphere products only." if found else
+        "next_step": ("Recommend these ShopSphere products only, like a shopkeeper: one line on why each fits "
+                      "what the shopper said, then ask whether to add the best one (size, colour) to the cart."
+                      if found else
                       "ShopSphere has no match. Say so in one line, then search the web right away "
                       "(don't ask first) and label those results as other stores, not ShopSphere."),
     }
@@ -302,6 +320,35 @@ def get_shopsphere_product(product_id: str, size: Optional[str] = None, visitor_
               response=f"{p['name']}: ${p.get('price')}, rating {p.get('rating')} from {p.get('review_count')} reviews; "
                        f"highlights {', '.join(p.get('tags') or []) or '—'}",
               pattern="UCP-inspired product discovery")
+    return out
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_shopping_questions(request: str, for_whom: Optional[str] = None, use: Optional[str] = None,
+                           size: Optional[str] = None, color: Optional[str] = None,
+                           max_price: Optional[float] = None) -> dict:
+    """Shopkeeper help before searching: what's already understood from the shopper's words, and the
+    few questions that would still narrow ShopSphere's in-stock products (who it's for, what it's for,
+    size, colour, budget), each with ONLY the options ShopSphere really has. Call it for a broad request
+    and again after each answer; ask its first one or two questions in one friendly sentence. When
+    ready_to_search is true (few products left, or nothing useful to ask), call search_shopsphere with
+    search_args. Read-only: nothing is searched, shown or changed.
+
+    Args:
+        request: everything the shopper has said about what they want, in their words
+            (e.g. "running shoes for my wife, road, under $150").
+        for_whom: their answer to "who is it for?" (e.g. "women", "men", "kids", "a child", "an adult").
+        use: their answer to "what for?" (e.g. "running", "trail") if given.
+        size, color, max_price: as answered.
+    """
+    with Session(get_engine()) as db:
+        out = discovery.plan(db, request, for_whom=for_whom, use=use, size=size, color=color, max_price=max_price)
+    pt.record(pt.MCP_SERVER, "Catalog service (SneakPeek)", pt.IN_PROCESS, "Shopper needs clarified (discovery)",
+              request=", ".join(f"{k} {v}" for k, v in out["understood"].items()) or "nothing specific yet",
+              response=(f"{out['matches_now']} in stock match; " if out["matches_now"] is not None else "")
+                       + ("ready to search" if out["ready_to_search"] else
+                          "ask: " + ", ".join(q["id"] for q in out["questions"][:2])),
+              status="info", pattern="UCP-inspired product discovery")
     return out
 
 
@@ -522,7 +569,7 @@ def search_shopsphere(query: str, category: Optional[str] = None, size: Optional
             Only products with that size in stock are returned.
         color: optional colour, e.g. "black".
         max_price: optional budget in USD.
-        gender: optional: men, women or unisex.
+        gender: optional: men, women, unisex or kids (ShopSphere's small kids' section).
         brand: optional brand name.
         limit: how many recommendations (1-5, default 3).
         visitor_cart: the visitor_cart id from an earlier result in this chat, if any.

@@ -87,14 +87,14 @@ def test_db_seeds_shopsphere_as_only_merchant(tmp_db):
     assert count == 1
 
 
-def test_db_seeds_60_products(tmp_db):
+def test_db_seeds_66_products(tmp_db):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
     from backend.db.schema import Product
     engine = create_engine(f"sqlite:///{tmp_db}")
     with Session(engine) as s:
         count = s.query(Product).count()
-    assert count == 60
+    assert count == 66
 
 
 def test_db_seeds_six_agents(tmp_db):
@@ -122,17 +122,17 @@ def test_merchants_returns_shopsphere(client):
     assert [m["merchant_id"] for m in data] == ["SHOPSPHERE"]
 
 
-def test_products_returns_60(client, member_headers):
+def test_products_returns_66(client, member_headers):
     r = client.get("/api/products", headers=member_headers)
     assert r.status_code == 200
-    assert len(r.json()) == 60
+    assert len(r.json()) == 66
 
 
 def test_products_filter_by_category(client, member_headers):
     r = client.get("/api/products?category=running_shoes", headers=member_headers)
     assert r.status_code == 200
     products = r.json()
-    assert len(products) == 7
+    assert len(products) == 9                       # 7 adult + 2 kids' (Junior Runner, Trail Scout)
     assert all(p["category"] == "running_shoes" for p in products)
 
 
@@ -140,7 +140,7 @@ def test_products_filter_by_merchant(client, member_headers):
     r = client.get("/api/products?merchant_id=SHOPSPHERE", headers=member_headers)
     assert r.status_code == 200
     products = r.json()
-    assert len(products) == 60
+    assert len(products) == 66
     assert all(p["merchant_id"] == "SHOPSPHERE" for p in products)
 
 

@@ -218,7 +218,7 @@ class ExternalAuthorizedProfileProvider(AgentProfileProvider):
             ref = "tok_ext_" + hmac.new(secret, f"{self.name}:{it['reference']}".encode(), hashlib.sha256).hexdigest()[:32]
             pm = db.query(PaymentMethod).filter_by(user_id=subject, token_ref=ref, source=self.SOURCE).first()
             if not pm:
-                pm = PaymentMethod(payment_method_id=f"ext_{secrets.token_hex(6)}", user_id=subject,
+                pm = PaymentMethod(payment_method_id=f"ext_{secrets.choice('abcdef')}{secrets.token_hex(5)}", user_id=subject,
                                    brand=cards.network_display(cards.normalize_network(it["network"])), issuer=None,
                                    status="active", source=self.SOURCE, last4=str(it["last4"])[-4:], exp_month=12,
                                    exp_year=2099, cardholder_name="", token_ref=ref, behaviour="approve", saved=False)

@@ -188,8 +188,14 @@ def _near(word: str, colour: str) -> bool:
     return prev[-1] <= 1
 
 
+_KIDS = re.compile(r"\b(kids?|kid'?s|child(?:ren)?'?s?|toddlers?|youth|juniors?|little (?:boy|girl|one)s?|"
+                   r"preschool(?:er)?s?|(?:grade|primary) school(?:er)?s?|\d{1,2}[- ]?(?:year|yr)s?[- ]?old)\b")
+
+
 def gender_of(text: str) -> Optional[str]:
     t = norm(text)
+    if _KIDS.search(t):                     # "for my 7 year old", "kids' shoes": the kids' section
+        return "kids"
     if re.search(r"\b(women'?s?|woman|ladies|lady|her|girls?|female|sister|wife|mom|mum|mother|"
                  r"girlfriend|daughter|aunt|grandma)\b", t):
         return "women"

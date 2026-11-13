@@ -288,6 +288,8 @@ def test_9_10_choose_a_sandbox_card_by_its_last_digits_and_say_yes(client):
     run = guest_buys_reply(client, card="4444")
     review, placed = run["review"], run["placed"]
     assert review["pay_with"] == "Mastercard •••• 4444 (sandbox)" and review["merchant"] == "ShopSphere"
+    # opaque ids never look like a card number (a letter first, never 12 digits in a row)
+    assert all(re.fullmatch(r"sbx_[a-f][0-9a-f]{10}", p["payment_method_id"]) for p in run["used"]["payment_methods"])
     assert "Sandbox card" in review["approval_method"]
     for k in ("items", "subtotal", "shipping", "tax", "total", "estimated_delivery", "ship_to", "pay_with"):
         assert review[k] not in (None, "", []), k                     # the complete summary

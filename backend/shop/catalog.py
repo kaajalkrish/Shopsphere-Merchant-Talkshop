@@ -132,8 +132,10 @@ def search(
         query = query.filter(Product.category == category)
     if subcategory:
         query = query.filter(Product.subcategory == subcategory)
-    if gender in ("women", "men"):
+    if gender in ("women", "men"):                     # adults: their own + unisex (never kids' sizes)
         query = query.filter(Product.gender.in_([gender, "unisex"]))
+    elif gender == "kids":
+        query = query.filter(Product.gender == "kids")
     if brand:
         query = query.filter(Product.brand.ilike(f"%{brand}%"))
     if min_price is not None:

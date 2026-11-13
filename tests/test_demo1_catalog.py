@@ -25,18 +25,24 @@ def test_shopsphere_is_the_only_merchant(db):
     assert [m.merchant_name for m in db.query(Merchant)] == ["ShopSphere"]
 
 
-def test_catalog_has_60_products_across_four_departments(db):
+def test_catalog_has_66_products_across_four_departments(db):
     products = db.query(Product).all()
-    assert len(products) == 60
+    assert len(products) == 66
     assert {p.department for p in products} == {"shoes", "clothing", "accessories", "electronics"}
-    assert all(p.gender in {"women", "men", "unisex"} for p in products)
+    assert all(p.gender in {"women", "men", "unisex", "kids"} for p in products)
+    kids = [p for p in products if p.gender == "kids"]                  # the small kids' section
+    assert len(kids) == 6 and {p.department for p in kids} == {"shoes", "clothing", "accessories"}
 
 
 def test_every_variant_has_a_colour_photo_on_disk(db):
     variants = db.query(ProductVariant).all()
     assert variants
-    missing = [v.sku for v in variants if not v.image_url or not (PUBLIC / v.image_url.lstrip("/")).exists()]
+    kids = {p.product_id for p in db.query(Product).filter_by(gender="kids")}
+    missing = [v.sku for v in variants if v.product_id not in kids
+               and (not v.image_url or not (PUBLIC / v.image_url.lstrip("/")).exists())]
     assert missing == []
+    # kids' products have no hand-picked photo yet: shown without one, never with another product's
+    assert all(v.image_url is None for v in variants if v.product_id in kids)
 
 
 def test_every_photo_has_a_licence_record():
@@ -44,6 +50,9 @@ def test_every_photo_has_a_licence_record():
     record = json.loads((ROOT / "data" / "catalog_images.json").read_text(encoding="utf-8"))
     for p in catalog["products"]:
         for c in p["colors"]:
+            if c["photo"] is None:                                  # kids' products: no photo yet, none used
+                assert p["gender"] == "kids" and p["slug"] not in record
+                continue
             entry = record[p["slug"]][c["name"]]
             assert entry["pixabay_id"] == c["photo"]["pixabay_id"]
             assert entry["license"] == "Pixabay Content License"

@@ -8,7 +8,7 @@ import type { PasskeyChallenge } from "./member";
 export interface ColorOption { name: string; hex: string; image_url: string | null; in_stock: boolean }
 export interface Product {
   product_id: string; slug: string; merchant_id: string; name: string; brand: string;
-  department: string; category: string; subcategory: string; gender: "women" | "men" | "unisex";
+  department: string; category: string; subcategory: string; gender: "women" | "men" | "unisex" | "kids";
   description: string; tags: string[]; price: number; currency: string; rating: number; review_count: number;
   is_new: boolean; delivery_days: number; option_label: string; image_url: string | null;
   colors: ColorOption[]; sizes: string[]; in_stock: boolean;

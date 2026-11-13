@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v10` (also `/mcp`, `/shop`, `/shop/v9`; after new tools are added, connect at the next version, e.g. `/shop/v11`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v11` (also `/mcp`, `/shop`, `/shop/v10`; after new tools are added, connect at the next version, e.g. `/shop/v12`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
 The cards work by themselves: every button calls ShopSphere directly and the next step (cart, checkout, guest form,
@@ -90,8 +90,17 @@ read-only). Searching and the cart are open (a visitor cart per chat). At checko
 **Conversational checkout.** One continuous conversation: the shopper asks, changes their mind and authorizes;
 Claude does the rest with tools. The cards stay as optional shortcuts.
 
+Claude starts like a shopkeeper ([`backend/shop/discovery.py`](backend/shop/discovery.py)): for a broad request it
+calls `get_shopping_questions`, which says what's already understood and which questions would still narrow the
+in-stock products (who it's for, what for, size, colour, budget), each with only the options ShopSphere has. Claude
+asks one or two at a time, never repeats what the shopper said, and searches when a few products are left or the
+shopper says "just show me". "For my son/daughter" gets "a child or an adult?". ShopSphere has a small **kids'
+section** (6 fictional house-brand products, `gender: kids`, sizes 11C–6Y and 4–14, no photos yet); kids' items only
+appear when the shopper asks for kids.
+
 | Shopper says | Claude calls | ShopSphere does |
 |---|---|---|
+| "I'm looking for running shoes" | `get_shopping_questions` | "Who are they for? Road or trail?" with real options; read-only |
 | "Running shoes under $150, size 10" | `search_shopsphere` | catalog search; cards with photos |
 | "Is the first one waterproof? Black? Reviews?" | `get_shopsphere_product` | real facts only: description, highlights, stock per size/colour, average rating + review count (no review texts; unlisted features are "not listed") |
 | "Any offers on these?" | `get_available_offers` | read-only: each offer as `public`, `conditional` (not verified, with what it would be worth), `verified` (a signed-in customer the offer engine checked) or `not_eligible` (with the reason). No checkout, sign-in, address or card |

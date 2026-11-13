@@ -167,7 +167,9 @@ def main():
             if only and product["product_id"] not in only:
                 continue
             for c in product["colors"]:
-                photo = c["photo"]
+                photo = c.get("photo")
+                if not photo:                                    # no hand-picked photo yet (e.g. kids')
+                    continue
                 dest = OUT_DIR / product["slug"] / f"{'-'.join(c['name'].lower().split())}.webp"
                 done = record.get(product["slug"], {}).get(c["name"], {})
                 if dest.exists() and not refresh and done.get("pixabay_id") == photo["pixabay_id"]:

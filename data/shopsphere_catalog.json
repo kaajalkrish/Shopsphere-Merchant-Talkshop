@@ -32,6 +32,27 @@
    "9",
    "10"
   ],
+  "shoe_kids": [
+   "11C",
+   "12C",
+   "13C",
+   "1Y",
+   "2Y",
+   "3Y",
+   "4Y",
+   "5Y",
+   "6Y"
+  ],
+  "apparel_kids": [
+   "4",
+   "5",
+   "6",
+   "7",
+   "8",
+   "10",
+   "12",
+   "14"
+  ],
   "apparel_women": [
    "XS",
    "S",
@@ -2524,6 +2545,265 @@
     "bluetooth",
     "portable",
     "budget"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP061",
+   "slug": "kinetic-junior-runner",
+   "name": "Kinetic Junior Runner",
+   "brand": "Kinetic",
+   "department": "shoes",
+   "category": "running_shoes",
+   "subcategory": "running",
+   "gender": "kids",
+   "price": 59.99,
+   "rating": 4.6,
+   "review_count": 412,
+   "delivery_days": 3,
+   "is_new": true,
+   "option_label": "Size",
+   "sizes": "shoe_kids",
+   "colors": [
+    {
+     "name": "Blue",
+     "hex": "#2f5fb3",
+     "photo": null
+    },
+    {
+     "name": "Pink",
+     "hex": "#e8a0b4",
+     "photo": null
+    },
+    {
+     "name": "Black",
+     "hex": "#1c1c1e",
+     "photo": null
+    }
+   ],
+   "description": "A light, cushioned kids' running shoe with a hook-and-loop strap and a grippy rubber sole for school and play.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "running",
+    "easy on",
+    "school"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP062",
+   "slug": "northpace-kids-trail-scout",
+   "name": "Northpace Kids Trail Scout",
+   "brand": "Northpace",
+   "department": "shoes",
+   "category": "running_shoes",
+   "subcategory": "trail",
+   "gender": "kids",
+   "price": 54.99,
+   "rating": 4.5,
+   "review_count": 238,
+   "delivery_days": 4,
+   "is_new": false,
+   "option_label": "Size",
+   "sizes": "shoe_kids",
+   "colors": [
+    {
+     "name": "Green",
+     "hex": "#3e7d4f",
+     "photo": null
+    },
+    {
+     "name": "Navy",
+     "hex": "#1f2a44",
+     "photo": null
+    }
+   ],
+   "description": "A sturdy kids' trail shoe with toe protection and deep lugs for parks, trails and muddy days.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "trail",
+    "outdoor",
+    "durable"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP063",
+   "slug": "sphere-kids-light-up-sneaker",
+   "name": "Sphere Kids Light-Up Sneaker",
+   "brand": "Sphere",
+   "department": "shoes",
+   "category": "sneakers",
+   "subcategory": "sneakers",
+   "gender": "kids",
+   "price": 44.99,
+   "rating": 4.7,
+   "review_count": 655,
+   "delivery_days": 3,
+   "is_new": true,
+   "option_label": "Size",
+   "sizes": "shoe_kids",
+   "colors": [
+    {
+     "name": "White",
+     "hex": "#f5f5f2",
+     "photo": null
+    },
+    {
+     "name": "Pink",
+     "hex": "#e8a0b4",
+     "photo": null
+    },
+    {
+     "name": "Black",
+     "hex": "#1c1c1e",
+     "photo": null
+    }
+   ],
+   "description": "A canvas kids' sneaker with a light-up sole and an elastic lace so little ones can slip it on themselves.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "light-up",
+    "casual",
+    "slip-on"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP064",
+   "slug": "kids-graphic-crew-tee",
+   "name": "Kids Graphic Crew Tee",
+   "brand": "Sphere Basics",
+   "department": "clothing",
+   "category": "clothing",
+   "subcategory": "tops",
+   "gender": "kids",
+   "price": 16.99,
+   "rating": 4.4,
+   "review_count": 321,
+   "delivery_days": 3,
+   "is_new": false,
+   "option_label": "Size",
+   "sizes": "apparel_kids",
+   "colors": [
+    {
+     "name": "Yellow",
+     "hex": "#e7c33a",
+     "photo": null
+    },
+    {
+     "name": "Blue",
+     "hex": "#2f5fb3",
+     "photo": null
+    },
+    {
+     "name": "Red",
+     "hex": "#c0392b",
+     "photo": null
+    }
+   ],
+   "description": "A soft cotton crew-neck tee with a playful print, made to survive the wash.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "cotton",
+    "t-shirt",
+    "everyday"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP065",
+   "slug": "kids-zip-fleece-hoodie",
+   "name": "Kids Zip Fleece Hoodie",
+   "brand": "Northpace",
+   "department": "clothing",
+   "category": "clothing",
+   "subcategory": "tops",
+   "gender": "kids",
+   "price": 29.99,
+   "rating": 4.6,
+   "review_count": 289,
+   "delivery_days": 4,
+   "is_new": true,
+   "option_label": "Size",
+   "sizes": "apparel_kids",
+   "colors": [
+    {
+     "name": "Navy",
+     "hex": "#1f2a44",
+     "photo": null
+    },
+    {
+     "name": "Purple",
+     "hex": "#6d4c9f",
+     "photo": null
+    },
+    {
+     "name": "Grey",
+     "hex": "#8e9196",
+     "photo": null
+    }
+   ],
+   "description": "A warm brushed-fleece hoodie with a full zip and pockets, for chilly mornings and the playground.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "fleece",
+    "hoodie",
+    "warm"
+   ],
+   "out_of_stock": []
+  },
+  {
+   "product_id": "SSP066",
+   "slug": "kids-school-backpack",
+   "name": "Kids School Backpack",
+   "brand": "Sphere",
+   "department": "accessories",
+   "category": "bags",
+   "subcategory": "bags",
+   "gender": "kids",
+   "price": 34.99,
+   "rating": 4.5,
+   "review_count": 207,
+   "delivery_days": 3,
+   "is_new": false,
+   "option_label": "Size",
+   "sizes": "one_size",
+   "colors": [
+    {
+     "name": "Blue",
+     "hex": "#2f5fb3",
+     "photo": null
+    },
+    {
+     "name": "Pink",
+     "hex": "#e8a0b4",
+     "photo": null
+    },
+    {
+     "name": "Green",
+     "hex": "#3e7d4f",
+     "photo": null
+    }
+   ],
+   "description": "A light 15-litre school backpack with padded straps, a water-bottle pocket and reflective trim.",
+   "tags": [
+    "kids",
+    "boys",
+    "girls",
+    "school",
+    "backpack",
+    "lightweight"
    ],
    "out_of_stock": []
   }
