@@ -157,6 +157,8 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anywhere}
 @media (max-width:560px){dl{grid-template-columns:1fr}dt{margin-top:4px}.chip{white-space:normal}
 .stat{font-size:12px;padding:4px 8px}main{padding:12px 16px}}
+.story{margin:0 0 18px;padding:12px;border:1px solid var(--line,#d8dde6);border-radius:12px}
+.story .kids{padding-left:14px;border-left:2px solid var(--line,#d8dde6)}
 </style></head>
 <body>
 <header><div class="wrap">
@@ -171,6 +173,8 @@ html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anyw
     <button data-f="pay" aria-pressed="false">Payment</button>
     <button data-f="sim" aria-pressed="false">Simulated only</button>
     <button data-f="fail" aria-pressed="false">Failures</button>
+    <button data-v="story" aria-pressed="true" title="Each prompt or button click with what it caused">Story</button>
+    <button data-v="list" aria-pressed="false" title="Every event, oldest first">List</button>
     <span style="flex:1"></span>
     <button class="ghost" id="clear" title="Delete this trace's events and start fresh">Clear trace</button>
   </div>
@@ -181,7 +185,7 @@ html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anyw
 </div></main>
 <script>
 const TID = "__TRACE_ID__";
-let filter = "all", last = "";
+let filter = "all", view = "story", last = "";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmt = t => { const d = new Date(t * 1000); return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit",
   second:"2-digit"}) + "." + String(d.getMilliseconds()).padStart(3, "0"); };
@@ -208,12 +212,33 @@ function row(e) {
       ${e.correlation ? `<span class="chip corr" title="Correlation id">${esc(e.correlation)}</span>` : ""}</div>
     <dl>${req}${res}</dl></div></li>`;
 }
+// Story view: each tool call (one prompt step or one button click) with the services and protocol
+// steps it caused under it; connection and discovery rows form their own block.
+function groupsOf(events) {
+  const gs = [{call: null, rows: []}];
+  for (const e of events) {
+    const op = e.operation || "";
+    if (op.startsWith("tools/call")) gs.push({call: e, rows: []});
+    else if (op.startsWith("initialize") || op.startsWith("tools/list")) gs.push({call: null, rows: [e]});
+    else gs[gs.length - 1].rows.push(e);
+  }
+  return gs.filter(g => g.call || g.rows.length);
+}
+function story(events) {
+  return groupsOf(events).map(g => {
+    const rows = g.rows.filter(keep);
+    if (!rows.length && !(g.call && keep(g.call))) return "";
+    const head = g.call ? row(g.call) : "";
+    const kids = rows.map(row).join("");
+    return `<li class="story"><ol class="kids">${head}${kids}</ol></li>`;
+  }).join("");
+}
 async function load() {
   try {
     const r = await fetch(`/trace/${TID}/events`, {cache: "no-store"});
     if (!r.ok) return;
     const data = await r.json();
-    const sig = JSON.stringify([data.events.length, data.events.at(-1)?.at, filter]);
+    const sig = JSON.stringify([data.events.length, data.events.at(-1)?.at, filter, view]);
     if (!document.getElementById("facts").innerHTML)
       document.getElementById("facts").innerHTML = data.protocols.map(p =>
         `<tr><td>${esc(p.name)}</td><td>${esc(p.status)}</td><td>${esc(p.detail)}</td></tr>`).join("");
@@ -226,8 +251,9 @@ async function load() {
       `<span class="stat">simulated <b>${s.simulated}</b></span><span class="stat">failures <b>${s.failures}</b></span>` +
       (s.last_order ? `<span class="stat">order <b>${esc(s.last_order)}</b></span>` : "");
     const shown = data.events.filter(keep);
-    document.getElementById("list").innerHTML = shown.length ? shown.map(row).join("")
-      : `<li class="empty">${data.events.length ? "No events match this filter." : "Waiting for the first event…"}</li>`;
+    const body = view === "story" ? story(data.events) : shown.map(row).join("");
+    document.getElementById("list").innerHTML = body
+      || `<li class="empty">${data.events.length ? "No events match this filter." : "Waiting for the first event…"}</li>`;
   } catch (e) { /* offline for a moment: try again on the next tick */ }
 }
 document.getElementById("filters").addEventListener("click", ev => {
@@ -236,6 +262,11 @@ document.getElementById("filters").addEventListener("click", ev => {
   document.querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
   load();
 });
+document.querySelectorAll("button[data-v]").forEach(b => b.addEventListener("click", () => {
+  view = b.dataset.v;
+  document.querySelectorAll("button[data-v]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  load();
+}));
 document.getElementById("clear").addEventListener("click", async () => {
   if (!confirm("Delete this trace's events?")) return;
   await fetch(`/trace/${TID}/clear`, {method: "POST"}); last = ""; load();

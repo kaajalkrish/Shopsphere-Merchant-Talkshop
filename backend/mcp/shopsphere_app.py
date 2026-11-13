@@ -79,6 +79,9 @@ questions, changes their mind and authorizes the purchase; you do the rest with 
 with buttons appear too; they're optional shortcuts, never required.
 
 Be a good shopkeeper, not a search box:
+0. Live trace: search, cart and checkout results include a trace_url. In your first reply that uses a
+   tool in a chat, and whenever the shopper asks what happened, give one line: "Live trace (open in a
+   new tab): <trace_url>", using the trace_url from the latest result. Never make up a link.
 1. When the shopper asks for something broad ("running shoes", "a gift for my son", "headphones"),
    call get_shopping_questions with their words (and anything they've told you) BEFORE searching.
    Ask its first one or two questions in ONE short, friendly message ("Happy to help! Who are they
@@ -622,6 +625,8 @@ def _with_cart(result: dict, visitor_cart: Optional[str]) -> None:
         result["next_step"] = (result.get("next_step") or "") + (
             " The shopper isn't signed in: pass visitor_cart to later search_shopsphere, add_to_cart, "
             "show_cart and checkout calls in this chat. Sign-in is only needed at checkout.")
+    # Every result carries the live flow link for this shopper (or the connector trace before any shopper).
+    result["trace_url"] = _trace_url(pt.current() or pt.CONNECTOR_TRACE)
 
 
 def _shopper(visitor_cart: Optional[str]) -> tuple[str, Optional[str]]:
@@ -700,6 +705,7 @@ def add_to_cart(product_id: str, size: Optional[str] = None, color: Optional[str
            "currency": p.get("currency", "USD"), "line_id": line_id,
            "delivery_estimate": delivery_estimate(p.get("delivery_days")),
            "cart_items": cart["item_count"], "cart_subtotal": cart["subtotal"],
+           "trace_url": _trace_url(pt.current() or pt.CONNECTOR_TRACE),
            "next_step": "Confirm the item, its price and the delivery estimate. Nothing has been charged. When the "
                         "shopper wants to buy it, buy this line (line_ids=[line_id])."}
     if cart_id:
@@ -899,7 +905,8 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
     view, state = _checkout_view(co)
     data = {k: co.get(k) for k in ("checkout_id", "checkout_version", "subtotal", "offer_discount", "points_discount",
                                    "shipping", "tax", "total", "currency", "earn_points", "ready", "issues")}
-    data.update({"items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"),
+    data.update({"trace_url": _trace_url(pt.current() or pt.CONNECTOR_TRACE),
+                 "items": [{"name": ln["name"], "size": ln.get("size"), "color": ln.get("color"),
                             "quantity": ln["quantity"]} for ln in co["lines"]],
                  "delivery": (co.get("delivery") or {}).get("method"), "arrives": (co.get("delivery") or {}).get("date"),
                  "ship_to": (co.get("address") or {}).get("display"),
@@ -1513,7 +1520,7 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
                   request="Retry after the order was placed", response=f"{done['order_id']}: not charged again",
                   status="info", pattern="Idempotency", correlation=done["order_id"])
         return {"status": "authorized", "duplicate": True, "order_id": done["order_id"], "total": done.get("total"),
-                "arrives": done.get("delivery_date"), "trace_url": _trace_url(pt.current()),
+                "arrives": done.get("delivery_date"), "trace_url": _trace_url(pt.current() or pt.CONNECTOR_TRACE),
                 "next_step": "This order was already placed; it was not charged again."}
     claims = read_purchase_authorization(authorization)
     reply = "card_button" if via_card else purchase_consent.classify_reply(customer_reply)
@@ -1567,7 +1574,7 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
     if res.get("status") == "provider_handoff_needed":
         page = await _open_secure_page(user, cid, version, amount, currency, guest=guest)
         return {"status": "verification_required", "secure_page": page["hosted_url"],
-                "trace_url": _trace_url(pt.current()),
+                "trace_url": _trace_url(pt.current() or pt.CONNECTOR_TRACE),
                 "next_step": "A new card is entered and verified on the secure payment page, never in the chat: give "
                              "the shopper this link. When they say they're done, call "
                              + ("finish_guest_payment with guest_token." if guest else
@@ -1593,7 +1600,7 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
             "paid_with": res.get("card") or (order.get("payment") or {}).get("display"),
             "confirmation_sent_to": _mask_email(mail.get("to")), "email_delivery": delivery,
             "email_note": _EMAIL_NOTE.get(delivery, _EMAIL_NOTE["outbox"]),
-            "trace_url": _trace_url(pt.current()),
+            "trace_url": _trace_url(pt.current() or pt.CONNECTOR_TRACE),
             "next_step": "Confirm the Order ID, total and estimated delivery, and say what email_note says about the "
                          "confirmation (don't claim it was delivered unless email_delivery is \"sent\"). Then one line: "
                          "\"Technical trace: <trace_url>\". Guests track it with track_order (Order ID + their email); "
