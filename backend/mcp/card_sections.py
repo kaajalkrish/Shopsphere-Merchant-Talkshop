@@ -166,22 +166,28 @@ def guest_card_state(co: Optional[dict] = None, token: str = "") -> dict:
         "checkout_id": "", "version": 0, "total": 0.0, "currency": "USD", "total_text": "", "subtotal_text": "",
         "tax_text": "", "delivery_label": "", "shipping_text": "", "arrives": "", "has_details": False,
         "ship_to": "", "contact": "", "payable": False, "problem": "", "lines": []}
-    from backend.shop import guest_wallet           # the shopper's authorized (fictional demo) profile
-    offer = guest_wallet.offer() if co else {"available": False}
+    from backend.shop import agent_profile          # the shopper's authorized (fictional demo) profile
+    prov = agent_profile.provider() if co else None
+    preview = (prov.preview("") or {}) if prov else {}
+    offer = {"available": bool(prov), "areas": preview.get("areas") or [],
+             "networks": preview.get("payment_networks") or [], "simulated": bool(prov and prov.simulated)}
     return {**st, "guest_open": bool(co), "guest_token": token, "pay_currency": st["currency"],
             "delivery": ((co or {}).get("delivery") or {}).get("method") or "standard",
             "paid": False, "order_ref": "", "handing_off": False, "hosted_url": "", "session_id": "",
             "sent_to": "", "email_note": "", **{k: "" for k in GUEST_FIELDS},
             # profile path: use the saved shipping info, pick a sandbox card, review, approve
             "has_profile": bool(offer.get("available")),
-            "profile_text": f"{offer['name']} · {offer['ship_to']}" if offer.get("available") else "",
+            # before the shopper agrees: city/state and card networks only (no name, street or digits)
+            "profile_text": (f"A shipping address in {offer['areas'][0] if offer['areas'] else 'your profile'}"
+                             + (f" · {len(offer['networks'])} sandbox card(s)" if offer["networks"] else "")
+                             if offer.get("available") else ""),
             "profile_used": False, "typing": False,
             "g_cards": [], "review_ready": False, "authorization": "", "pay_with_text": ""}
 
 
 def _guest_profile_steps() -> None:
     """The guest's authorized profile: use the saved shipping info, pick a sandbox card, review,
-    then Approve & pay (place_order: Claude asks the shopper first). No form, no card entry."""
+    then Approve & pay (card_place_guest_order: Claude asks the shopper first). No form, no card entry."""
     S = STATE
     with If(~S.profile_used):
         Separator()
@@ -217,15 +223,14 @@ def _guest_profile_pay() -> None:
     S = STATE
     with If(S.review_ready), If(~S.paid):
         Button(f"Approve & pay {S.total_text}", on_click=CallTool(
-            "place_order", arguments={"guest_token": S.guest_token, "authorization": S.authorization,
-                                      "customer_confirmed": True},
+            "card_place_guest_order", arguments={"guest_token": S.guest_token, "authorization": S.authorization},
             onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
                        SetState("sent_to", RESULT.confirmation_sent_to), SetState("arrives", RESULT.arrives),
                        SetState("email_note", ""),
                        ShowToast("Payment approved", variant="success")],
             onError=failed_toast("Payment not completed")))
-        Muted("Claude asks you to allow the payment. Then ShopSphere checks this exact order again, runs the "
-              "(simulated) card approval and payment, and places the order once.")
+        Muted("Claude asks you to allow the payment. Then ShopSphere checks this exact order again (a single-use "
+              "authorization), runs the simulated card approval and payment, and places the order once.")
         Button("Change card or delivery", variant="ghost", size="sm", on_click=SetState("review_ready", False))
 
 

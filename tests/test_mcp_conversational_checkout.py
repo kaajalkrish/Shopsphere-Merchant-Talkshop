@@ -61,7 +61,7 @@ def guest_buys(client, *, decline: bool = False) -> dict:
            "review": review}
     if not decline:
         out["placed"] = tool(client, "place_order", guest_token=co["guest_token"], authorization=review["authorization"],
-                             customer_confirmed=True)
+                             customer_reply="Yes, proceed")
     return out
 
 
@@ -74,9 +74,10 @@ def test_b_guest_buys_in_a_conversation_with_an_authorized_profile_and_a_sandbox
     assert co["guest"] and co["guest_token"] and [i["name"] for i in co["items"]] == [run["shoe"]["name"]]
     assert co["items"][0]["unit_price"] == run["shoe"]["price"] and run["added"]["delivery_estimate"]["standard"]
     # "I have your shipping information available…" comes from the configured profile, nothing else
-    offer = co["saved_profile"]
-    assert offer["available"] and offer["name"] == "Jordan Lee" and "San Francisco, CA 94105" in offer["ship_to"]
-    assert offer["email"].startswith("j***@")
+    offer = co["saved_profile"]          # before consent: provider, city/state and networks only
+    assert offer["available"] and offer["simulated"] and offer["address_areas"][0] == "San Francisco, CA"
+    assert "San Francisco, CA" in offer["ask"] and not offer["consented"]
+    assert "Jordan" not in json.dumps(offer) and "500 Market" not in json.dumps(offer) and "@" not in json.dumps(offer)
     # "Yes" → delivery date + the configured sandbox cards, network + last 4 only
     assert profile["shipping_from_profile"] and "San Francisco" in profile["ship_to"]
     assert profile["estimated_delivery"] and [p["display"] for p in profile["payment_methods"]] == [
@@ -95,7 +96,7 @@ def test_b_guest_buys_in_a_conversation_with_an_authorized_profile_and_a_sandbox
     assert order.payment_status == "authorized" and order.amount == review["total"]
     # retried (e.g. a network hiccup): the same order, never a second charge
     again = tool(client, "place_order", guest_token=co["guest_token"], authorization=review["authorization"],
-                 customer_confirmed=True)
+                 customer_reply="Yes, proceed")
     assert again["duplicate"] and again["order_id"] == placed["order_id"]
     assert len(orders_for(co["checkout_id"])) == 1
     with get_session() as db:
@@ -136,8 +137,8 @@ def test_d_declined_authorization_creates_no_payment_and_no_order(client):
     run = guest_buys(client, decline=True)
     co, review = run["co"], run["review"]
     no = tool(client, "place_order", guest_token=co["guest_token"], authorization=review["authorization"],
-              customer_confirmed=False)
-    assert "explicitly authorizes" in no["error"]
+              customer_reply="No, not today")
+    assert "isn't a clear yes" in no["error"] and "decline_order" in no["error"]
     out = tool(client, "decline_order", guest_token=co["guest_token"], reason="Not today")
     assert out == {**out, "status": "not_placed", "charged": False, "order_created": False}
     assert not orders_for(co["checkout_id"])
@@ -152,17 +153,17 @@ def test_d_an_authorization_only_covers_the_exact_order(client):
     co, review = run["co"], run["review"]
     other = guest_buys(client, decline=True)
     stolen = tool(client, "place_order", guest_token=co["guest_token"], authorization=other["review"]["authorization"],
-                  customer_confirmed=True)
+                  customer_reply="yes")
     assert "isn't valid for this order" in stolen["error"]             # another order's authorization
     tool(client, "update_guest_checkout", guest_token=co["guest_token"], delivery="express")
     changed = tool(client, "place_order", guest_token=co["guest_token"], authorization=review["authorization"],
-                   customer_confirmed=True)
+                   customer_reply="yes")
     assert "changed after the shopper authorized" in changed["error"]  # the total changed: approve again
     assert not orders_for(co["checkout_id"])
     fresh = tool(client, "review_order", guest_token=co["guest_token"])
     assert fresh["delivery"] == "express" and fresh["total"] > review["total"]
     placed = tool(client, "place_order", guest_token=co["guest_token"], authorization=fresh["authorization"],
-                  customer_confirmed=True)
+                  customer_reply="Yes, go ahead")
     assert placed["status"] == "authorized" and len(orders_for(co["checkout_id"])) == 1
 
 
@@ -184,7 +185,7 @@ def test_e_guest_is_never_asked_to_sign_in(client):
     review = tool(client, "review_order", guest_token=co["guest_token"], payment_method_id="provider")
     assert review["ready"] and "secure payment page" in review["pay_with"]
     page = tool(client, "place_order", guest_token=co["guest_token"], authorization=review["authorization"],
-                customer_confirmed=True)
+                customer_reply="Yes")
     assert page["status"] == "verification_required" and "/psp/hosted/" in page["secure_page"]
     assert "finish_guest_payment" in page["next_step"] and not orders_for(co["checkout_id"])
     # still: account tools without a guest checkout ask for sign-in, as before
@@ -205,8 +206,20 @@ def test_a_existing_customer_buys_with_saved_details_by_saying_yes(client):
     assert co["ship_to"] and co["saved_payment_methods"]
     review = tool(client, "review_order", token, checkout_id=co["checkout_id"])
     assert review["ready"] and review["authorization"] and review["ship_to"] == co["ship_to"]
+    # a saved card is a real-world-style credential: the chat yes isn't enough, the customer approves
+    # on ShopSphere's approval page in their own browser (simulated passkey), then Claude places it
+    step = tool(client, "place_order", token, checkout_id=co["checkout_id"], authorization=review["authorization"],
+                customer_reply="Yes, place it")
+    assert step["status"] == "approval_required" and step["charged"] is False and not orders_for(co["checkout_id"])
+    early = tool(client, "place_order", token, checkout_id=co["checkout_id"], authorization=review["authorization"],
+                 customer_reply="Yes, place it")
+    assert early["status"] == "approval_required"                       # still not approved: still not paid
+    path = "/" + step["approval_page"].split("/", 3)[3]
+    page = client.get(path)
+    assert page.status_code == 200 and "Approve with passkey (simulated)" in page.text and "ShopSphere" in page.text
+    assert client.post(path + "/approve").status_code == 200
     placed = tool(client, "place_order", token, checkout_id=co["checkout_id"], authorization=review["authorization"],
-                  customer_confirmed=True)
+                  customer_reply="I approved it")
     assert placed["status"] == "authorized" and placed["order_id"].startswith("SS-")
     assert len(orders_for(co["checkout_id"])) == 1
     mine = call(client, "my_orders", token, order_id=placed["order_id"])
@@ -233,8 +246,8 @@ def test_f_trace_shows_the_real_steps_in_order_without_secrets(client):
     ops = [e["operation"] for e in events]
     want = ["tools/call search_shopsphere", "Product search", "tools/call get_shopsphere_product",
             "Product details (clarification)", "tools/call add_to_cart", "Add to cart", "Guest checkout created",
-            "Guest checkout token issued", "Shipping information shared (shopper said yes)",
-            "Sandbox payment tokens issued", "Order re-verified before authorization",
+            "Guest checkout token issued", "Profile sharing consent", "Profile provider response: contact + shipping",
+            "Payment instruments listed (opaque references)", "Payment method selected (opaque reference)", "Order re-verified before authorization",
             "Purchase authorization requested", "Customer purchase authorization", "Consent scope",
             "Cardholder approval", "Gateway request sent", "Order confirmed", "Confirmation email"]
     at = [next(i for i, op in enumerate(ops) if op == w or op.startswith(w)) for w in want]
@@ -250,7 +263,7 @@ def test_f_trace_shows_the_real_steps_in_order_without_secrets(client):
     # honest labels: no A2A anywhere, protocol patterns qualified
     assert not any("A2A" in (e["protocol"] + (e["pattern"] or "")) for e in events)
     assert all(re.search(r"style|inspired|concept|Simulated|SIMULATED|orchestration|Security|Idempotency|rules|"
-                         r"Internal|Order updates|profile|tokens|PaymentGatewayAdapter|Fictional", e["pattern"])
+                         r"Internal|Order updates|profile|tokens|PaymentGatewayAdapter|Fictional|ShopSphere", e["pattern"])
                for e in events if e["pattern"])
     facts = {p["name"]: p["status"] for p in data["protocols"]}
     assert facts["A2A"] == "Not implemented" and facts["MCP"] == "Implemented"
@@ -268,11 +281,11 @@ def test_f_trace_shows_the_real_steps_in_order_without_secrets(client):
 
 def test_f_trace_failures_are_recorded_too(client):
     run = guest_buys(client, decline=True)
-    tool(client, "place_order", guest_token=run["co"]["guest_token"], authorization="forged", customer_confirmed=True)
+    tool(client, "place_order", guest_token=run["co"]["guest_token"], authorization="forged", customer_reply="yes")
     tid = pt.trace_id_for(mcp_visitor(run))
     rows = pt.events(tid)
     failed = [e for e in rows if e["status"] == "failure"]
-    assert failed and failed[-1]["operation"] == "tools/call place_order"
+    assert {"tools/call place_order", "Purchase authorization refused"} <= {e["operation"] for e in failed}
     assert any(e["operation"] == "Customer declined authorization" for e in rows) is False
     tool(client, "decline_order", guest_token=run["co"]["guest_token"])
     assert any(e["operation"] == "Customer declined authorization" for e in pt.events(tid))

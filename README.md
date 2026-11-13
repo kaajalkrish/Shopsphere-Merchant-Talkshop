@@ -67,7 +67,7 @@ and why: voice transcription, NeMo, guardrails-ai, Playwright and Phoenix are op
 already runs without them). Talkshop's mic uses the browser's speech recognition.
 
 **Shop from Claude (MCP connector).** The backend serves an MCP server at
-`https://shopsphere-api-ctnr.onrender.com/shop/v8` (also `/mcp`, `/shop`, `/shop/v7`; after new tools are added, connect at the next version, e.g. `/shop/v9`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
+`https://shopsphere-api-ctnr.onrender.com/shop/v10` (also `/mcp`, `/shop`, `/shop/v9`; after new tools are added, connect at the next version, e.g. `/shop/v11`, so the chat app reloads its tool list; [`backend/mcp/shopsphere_app.py`](backend/mcp/shopsphere_app.py)) that works
 like Talkshop inside Claude: product cards with photos, size/colour pickers and Add to cart, a cart card, a checkout card
 (Chase offers, points, delivery, tax, total) and Approve & pay with the simulated passkey, then the order and tracking.
 The cards work by themselves: every button calls ShopSphere directly and the next step (cart, checkout, guest form,
@@ -87,29 +87,56 @@ read-only). Searching and the cart are open (a visitor cart per chat). At checko
    email; also on the website's Track order page). Guests get no points, Wallet or Chase offers. Guest checkout is
    in the Claude connector only; the website still asks visitors to sign in.
 
-**Conversational checkout.** The shopper only chooses the product and authorizes the purchase; Claude does the
-rest with tools, no forms and no website:
+**Conversational checkout.** One continuous conversation: the shopper asks, changes their mind and authorizes;
+Claude does the rest with tools. The cards stay as optional shortcuts.
 
 | Shopper says | Claude calls | ShopSphere does |
 |---|---|---|
-| "Running shoes, size 10" | `search_shopsphere` | catalog search; cards with photos |
-| "Is the first one waterproof? Reviews?" | `get_shopsphere_product` | real facts only: description, highlights, average rating + review count (there are no review texts; unlisted features are "not listed") |
-| "I want the first one" | `add_to_cart` | price + delivery estimate for that line |
-| "Let's buy it" → "Continue as a guest" | `guest_checkout` | guest checkout priced (live price, stock, tax); offers the authorized profile |
-| "Yes, use my shipping info" | `use_guest_profile` | ships to the profile's address (this order only); the profile's sandbox cards as network + last 4 |
-| "The card ending in 4242" | `review_order` | re-checks stock, price, tax, shipping and date; returns the summary and a signed 15-minute authorization request for exactly that order |
-| "Yes, proceed" | `place_order` (Claude asks permission) | checks the authorization against the live order, runs the simulated cardholder approval, GreenLight, PayIt's 12 checks and the mock gateway, creates the order once, emails it, returns the Order ID |
-| "No" | `decline_order` | nothing approved, charged or ordered |
+| "Running shoes under $150, size 10" | `search_shopsphere` | catalog search; cards with photos |
+| "Is the first one waterproof? Black? Reviews?" | `get_shopsphere_product` | real facts only: description, highlights, stock per size/colour, average rating + review count (no review texts; unlisted features are "not listed") |
+| "Any offers on these?" | `get_available_offers` | read-only: each offer as `public`, `conditional` (not verified, with what it would be worth), `verified` (a signed-in customer the offer engine checked) or `not_eligible` (with the reason). No checkout, sign-in, address or card |
+| "Add the black one in size 10" | `add_to_cart` | price + delivery estimate for that line |
+| "Make it two" / "change it to white" / "remove it" | `update_cart_item` | quantity or variant change, stock checked first |
+| "What's my total so far? Any discounts?" | `preview_cart_discounts` | subtotal + best discount estimate, read-only |
+| "Let's buy it" → "As a guest" | `guest_checkout` | guest checkout priced; offers the authorized profile coarsely ("an address in San Francisco, CA") |
+| "Yes, use it" / "ship to my work address" | `use_guest_profile` | the shopper's consent for this chat; ships to the chosen profile address (this order only); payment methods as network + last 4 |
+| "The Visa" | `review_order` | re-checks stock, price, offers, tax, shipping and date; returns the summary and a single-use 15-minute authorization for exactly that order |
+| "Yes, proceed" | `place_order(authorization, customer_reply)` (Claude asks permission) | checks the authorization and the shopper's words, pays, creates the order once, emails it, returns the Order ID |
+| "No" | `decline_order` | nothing approved, charged or ordered; the authorization is void |
+| "Where's my order?" | `track_order` (guest: Order ID + email) / `my_orders` | tracking card |
 
-The guest profile is **fictional and configured on the server** ([`backend/config/demo_guest_profile.json`](backend/config/demo_guest_profile.json),
-[`backend/shop/guest_wallet.py`](backend/shop/guest_wallet.py); `GUEST_DEMO_PROFILE=off` turns it off,
-`GUEST_DEMO_PROFILE_PATH` points at another file). It stands in for profile data a shopper already shares with their
-assistant; nothing is read from Claude's own account or billing. Its cards (Visa •••• 4242, Mastercard •••• 4444) become
-opaque sandbox tokens for that guest only; the model never sees more than network + last 4. A changed order, another
-order's authorization, an expired one or `customer_confirmed=false` is refused, and a repeated `place_order` returns
-the same order without charging again. Choosing "a new card" instead still goes to the secure payment page
-(`place_order` answers `verification_required` with the link). Signed-in customers use the same `review_order` →
-`place_order` with their `checkout_id`, or the card's Approve & pay.
+**Payment approval** ([`backend/shop/purchase_consent.py`](backend/shop/purchase_consent.py)). A model calling a payment
+tool is never enough. Every `review_order` stores one authorization request server-side, bound to the merchant, the
+checkout, its version, total, currency, order fingerprint and payment reference; it lasts 15 minutes, a newer review
+replaces it, and it is consumed once just before payment. `place_order` refuses a forged, expired, used, replaced,
+declined or changed one, and anything in `customer_reply` that isn't a clear yes ("maybe", "no", a question, "yes but…").
+That reply check only guards against misreading the chat. What proves consent depends on the payment route:
+
+| Route | Proof |
+|---|---|
+| Sandbox card from the demo profile | the yes in the chat + Claude's own permission prompt (`place_order` is a destructive tool) + the single-use authorization. Simulated money only |
+| A customer's saved card, the Wallet, an external provider's credential | the customer approves on ShopSphere's approval page in their own browser (`/approve/<link>`, [`backend/routers/purchase_approval.py`](backend/routers/purchase_approval.py)); `place_order` answers `approval_required` until then. The passkey there is **simulated** (not WebAuthn or 3-D Secure; no issuer is contacted) |
+| A new card | entered and verified on the simulated payment provider's page (`verification_required`) |
+
+On the guest card, Approve & pay calls the app-only `card_place_guest_order` (the model can't call it); the
+signed-in card's Approve & pay is unchanged.
+
+**Where a guest's profile comes from** ([`backend/shop/agent_profile.py`](backend/shop/agent_profile.py)). Being a guest
+at ShopSphere doesn't have to mean the assistant knows nothing, so a guest checkout can ask a **profile provider** for
+what one order needs, after the shopper consents in that chat (a per-chat grant; another chat never sees it or its
+remembered choices). Two adapters:
+
+- `DemoAgentProfileProvider` (default): a **fictional** profile configured on the server
+  ([`backend/config/demo_guest_profile.json`](backend/config/demo_guest_profile.json): Jordan Lee, a home and a work
+  address, Visa •••• 4242 and Mastercard •••• 4444 as opaque sandbox tokens per guest). Labelled simulated everywhere.
+- `ExternalAuthorizedProfileProvider`: the interface for a real agent wallet, identity provider or token vault
+  (consented contact + shipping, masked instruments, opaque references). **Not configured**: Claude's connector
+  platform doesn't give merchants a user's saved addresses or cards, so ShopSphere doesn't claim it does. Only a
+  keyed hash of a provider's reference would be stored.
+
+`AGENT_PROFILE_PROVIDER=demo|external|off` picks one (`GUEST_DEMO_PROFILE=off` also turns the demo off). With none,
+the guest types name, email and address once and pays on the secure payment page. Nothing is ever read from Claude's
+own account or billing; card numbers never exist in the chat, the merchant or the trace.
 
 **Agent communication trace.** `place_order` returns a `trace_url` (`/trace/<id>`, [`backend/routers/trace.py`](backend/routers/trace.py)):
 a live timeline of what really ran for that shopper, oldest first: each MCP `tools/call` Claude made, OAuth

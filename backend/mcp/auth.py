@@ -239,15 +239,33 @@ PURCHASE_TTL = 15 * 60
 
 
 def issue_purchase_authorization(owner_id: str, checkout_id: str, version: int, total: float, currency: str,
-                                 checkout_hash: str, pay_with: str) -> str:
+                                 checkout_hash: str, pay_with: str, consent_id: Optional[str] = None,
+                                 merchant: str = "shopsphere") -> str:
+    """The token names its server-side consent row (jti = consent_id; backend/shop/purchase_consent.py),
+    which is what makes it single-use; the claims repeat the exact terms."""
+    extra = {"jti": consent_id} if consent_id else {}
     return _issue("purchase_auth", PURCHASE_TTL, sub=owner_id, chk=checkout_id, ver=int(version),
-                  amt=round(float(total) * 100), cur=currency, fp=(checkout_hash or "")[:16], pay=pay_with[:60])
+                  amt=round(float(total) * 100), cur=currency, fp=(checkout_hash or "")[:16], pay=pay_with[:60],
+                  mer=merchant, **extra)
 
 
 def read_purchase_authorization(token: Optional[str]) -> Optional[dict]:
     if not token or len(token) > 1500:
         return None
     return _read(token.strip(), "purchase_auth")
+
+
+# The customer's own approval page for a real-world-style payment route (purchase_consent
+# "customer_step_up"): the link names one consent row; opening it is the customer's step, not the model's.
+def issue_step_up(consent_id: str) -> str:
+    return _issue("purchase_step_up", PURCHASE_TTL, sub=consent_id)
+
+
+def read_step_up(token: Optional[str]) -> Optional[str]:
+    if not token or len(token) > 1500:
+        return None
+    claims = _read(token.strip(), "purchase_step_up")
+    return str(claims["sub"]) if claims and claims.get("sub") else None
 
 
 def _guest_checkout_ids(calls: list) -> bool:

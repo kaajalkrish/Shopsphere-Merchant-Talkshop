@@ -519,6 +519,48 @@ class ProtocolEvent(Base):
     layer = Column(String(12), nullable=False, default="real")   # real | simulated
 
 
+class PurchaseConsent(Base):
+    """One purchase authorization request for one exact order (MCP review_order), and what became of
+    it (backend/shop/purchase_consent.py). Server-side, so it is single-use and short-lived whatever
+    the model sends: the signed token handed to the assistant only names this row (jti)."""
+    __tablename__ = "purchase_consents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    consent_id = Column(String(40), unique=True, nullable=False)        # = the authorization token's jti
+    owner_id = Column(String(50), nullable=False, index=True)
+    checkout_id = Column(String(50), nullable=False, index=True)
+    checkout_version = Column(Integer, nullable=False)
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String(3), nullable=False)
+    pay_ref = Column(String(60), nullable=False)                      # opaque payment reference, never a PAN
+    fingerprint = Column(String(16), nullable=False)
+    merchant = Column(String(40), nullable=False)
+    level = Column(String(24), nullable=False)        # sandbox_chat | customer_step_up | provider_page
+    status = Column(String(16), nullable=False, default="issued")   # issued|approved|used|declined|superseded
+    created_at = Column(Float, nullable=False)
+    expires_at = Column(Float, nullable=False)
+    approved_at = Column(Float)
+    used_at = Column(Float)
+    evidence = Column(Text)                           # JSON: how the shopper's approval was obtained
+
+
+class ProfileGrant(Base):
+    """A shopper's consent, in ONE chat session (subject = that chat's visitor), for the merchant to
+    use contact + shipping details and masked payment instruments from an agent profile provider
+    (backend/shop/agent_profile.py). Nothing from a profile reaches an order without one."""
+    __tablename__ = "profile_grants"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    grant_id = Column(String(40), unique=True, nullable=False)
+    subject = Column(String(50), nullable=False, index=True)
+    provider = Column(String(40), nullable=False)
+    scopes = Column(String(120), nullable=False)        # e.g. "contact,shipping,payment_instruments"
+    status = Column(String(12), nullable=False, default="active")   # active | revoked
+    created_at = Column(Float, nullable=False)
+    expires_at = Column(Float, nullable=False)
+    preferences = Column(Text)          # JSON, non-sensitive, only when the shopper asked to remember them
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

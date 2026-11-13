@@ -1,5 +1,5 @@
 {
-  "_note": "FICTIONAL demo shopper profile for guest checkout in the Claude connector. It stands in for profile data a shopper has already authorized their assistant to share (like a wallet's shipping address and tokenized cards). Sandbox only: the cards are simulated test cards, issued as opaque sandbox tokens at use, never real card numbers. Turn it off with GUEST_DEMO_PROFILE=off, or point GUEST_DEMO_PROFILE_PATH at another file with this shape.",
+  "_note": "FICTIONAL demo shopper profile for guest checkout in the Claude connector. It stands in for profile data a shopper has already authorized their assistant to share (like a wallet's shipping address and tokenized cards). Sandbox only: the cards are simulated test cards, issued as opaque sandbox tokens at use, never real card numbers. Turn it off with GUEST_DEMO_PROFILE=off, or point GUEST_DEMO_PROFILE_PATH at another file with this shape. shipping_addresses lists the profile's addresses (the first is the default); shipping_address is kept for older readers.",
   "profile_name": "Demo guest wallet (fictional, sandbox)",
   "contact": {
     "full_name": "Jordan Lee",
@@ -12,8 +12,40 @@
     "state": "CA",
     "postal_code": "94105"
   },
+  "shipping_addresses": [
+    {
+      "id": "home",
+      "label": "Home",
+      "line1": "500 Market St",
+      "line2": "Suite 300",
+      "city": "San Francisco",
+      "state": "CA",
+      "postal_code": "94105"
+    },
+    {
+      "id": "work",
+      "label": "Work",
+      "line1": "2200 Broadway",
+      "line2": "Floor 4",
+      "city": "Oakland",
+      "state": "CA",
+      "postal_code": "94612"
+    }
+  ],
   "payment_methods": [
-    {"id": "sbx_visa_4242", "network": "Visa", "last4": "4242", "exp_month": 12, "exp_year": 2030},
-    {"id": "sbx_mc_4444", "network": "Mastercard", "last4": "4444", "exp_month": 11, "exp_year": 2029}
+    {
+      "id": "sbx_visa_4242",
+      "network": "Visa",
+      "last4": "4242",
+      "exp_month": 12,
+      "exp_year": 2030
+    },
+    {
+      "id": "sbx_mc_4444",
+      "network": "Mastercard",
+      "last4": "4444",
+      "exp_month": 11,
+      "exp_year": 2029
+    }
   ]
 }

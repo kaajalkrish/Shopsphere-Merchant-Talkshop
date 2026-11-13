@@ -123,9 +123,9 @@ async def confirm(user: CurrentUser, checkout_id: str, consent: bool, consent_mo
     with get_session() as db:
         from backend.shop import eligibility       # second line of defence (CH-2): a signed-in customer
         if guest:                                   # … or a guest on their own guest checkout: a new card,
-            from backend.shop import guest_wallet    # or a sandbox card from their authorized profile
+            from backend.shop import agent_profile    # or a card reference from their authorized profile
             co = checkout_service.get_checkout(db, user.user_id, checkout_id)
-            sandbox = co.pay_with == "card" and guest_wallet.is_sandbox_card(db, user.user_id, co.payment_method_id)
+            sandbox = co.pay_with == "card" and agent_profile.is_profile_instrument(db, user.user_id, co.payment_method_id)
             if not (user.is_visitor and checkout_service.is_guest_owner(db, user.user_id)
                     and (co.pay_with == "provider" or sandbox)):
                 raise checkout_service.CheckoutError(

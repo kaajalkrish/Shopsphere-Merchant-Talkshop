@@ -342,8 +342,9 @@ def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_for
     ui = CardDriver(client, cart_card)
     ui.click("Check out as guest")
     shown = ui.texts()
-    assert "I have your shipping information available" in shown and "Jordan Lee" in shown
-    assert "San Francisco, CA 94105" in shown and "g_name" not in ui.inputs()
+    assert "I have your shipping information available" in shown and "San Francisco, CA" in shown
+    assert "Jordan Lee" not in shown and "94105" not in shown        # nothing personal before the shopper agrees
+    assert "g_name" not in ui.inputs()
     assert not [b for b in ui.buttons() if b.startswith("Approve & pay")]
     ui.click("Yes, use it")
     assert ui.tool_calls[-1] == "card_use_guest_profile" and ui.state["profile_used"]
@@ -354,7 +355,7 @@ def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_for
     assert ui.tool_calls[-1] == "card_review_guest_order" and ui.state["review_ready"]
     assert "Pay with: Visa •••• 4242 (sandbox)" in ui.texts() and "Delivery: Express" in ui.texts()
     ui.click(f"Approve & pay {ui.state['total_text']}")
-    assert ui.tool_calls[-1] == "place_order" and ui.state["paid"] and ui.sign_in_requests == 0
+    assert ui.tool_calls[-1] == "card_place_guest_order" and ui.state["paid"] and ui.sign_in_requests == 0
     order_id = ui.state["order_ref"]
     shown = ui.texts()
     assert re.fullmatch(r"SS-\d{5}", order_id) and "✓ Your ShopSphere order has been placed" in shown
@@ -462,9 +463,11 @@ def test_claude_asks_only_before_checkout_and_before_paying(client):
     flags = {t["name"]: (t.get("annotations") or {}) for t in msg["result"]["tools"]}
     ask = {name for name, a in flags.items() if not a.get("readOnlyHint")}
     assert ask == {"checkout", "open_checkout", "open_guest_checkout",
-                   "approve_and_pay", "start_new_card_payment", "start_guest_payment", "place_order"}
+                   "approve_and_pay", "start_new_card_payment", "start_guest_payment", "place_order",
+                   "card_place_guest_order"}
     assert all(flags[n].get("destructiveHint") for n in ("approve_and_pay", "start_new_card_payment",
-                                                          "start_guest_payment", "place_order"))
+                                                          "start_guest_payment", "place_order",
+                                                          "card_place_guest_order"))
     for click in ("search_shopsphere", "add_to_cart", "view_cart", "show_cart", "update_cart_line",
                   "update_checkout_choices", "update_guest_checkout", "order_status", "track_order",
                   "my_orders", "advance_demo_shipment", "guest_checkout", "use_guest_profile", "review_order",
