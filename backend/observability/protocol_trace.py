@@ -42,6 +42,10 @@ MAX_EVENTS = 600                          # per trace; the oldest go first
 
 
 def trace_id_for(subject: str) -> str:
+    # Demo only: TRACE_DEMO_SINGLE_URL=1 sends every shopper's rows to the one fixed page
+    # /trace/tr_connector, so the link never changes. Off by default (per-shopper traces).
+    if os.getenv("TRACE_DEMO_SINGLE_URL") == "1":
+        return CONNECTOR_TRACE
     secret = os.getenv("JWT_SECRET_KEY", "demo-jwt-secret-replace-in-production")
     return "tr_" + hmac.new(secret.encode(), f"trace:{subject}".encode(), hashlib.sha256).hexdigest()[:24]
 
@@ -86,11 +90,14 @@ def close_scope(token: contextvars.Token, first: Optional[dict] = None) -> Optio
     """Write the call's rows (the call itself first) to its trace; returns the trace id."""
     scope = _SCOPE.get()
     _SCOPE.reset(token)
-    if not scope or not scope["trace"]:
+    if not scope:
         return None
+    # A call that no shopper is known for yet (no visitor cart, no sign-in) still shows on the
+    # connector trace, so every prompt and button click appears in the live flow.
+    target = scope["trace"] or CONNECTOR_TRACE
     rows = ([first] if first else []) + scope["events"]
-    _write(scope["trace"], rows)
-    return scope["trace"]
+    _write(target, rows)
+    return target
 
 
 def bind(subject_trace: Optional[str]) -> None:
