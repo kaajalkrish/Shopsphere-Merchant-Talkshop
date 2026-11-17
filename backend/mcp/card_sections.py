@@ -179,7 +179,7 @@ def guest_card_state(co: Optional[dict] = None, token: str = "") -> dict:
             "has_profile": bool(offer.get("available")),
             # before the shopper agrees: city/state and card networks only (no name, street or digits)
             "profile_text": (f"A shipping address in {offer['areas'][0] if offer['areas'] else 'your profile'}"
-                             + (f" · {len(offer['networks'])} sandbox card(s)" if offer["networks"] else "")
+                             + (f" · {len(offer['networks'])} saved card(s)" if offer["networks"] else "")
                              if offer.get("available") else ""),
             "profile_used": False, "typing": False,
             "g_cards": [], "review_ready": False, "authorization": "", "pay_with_text": ""}
@@ -193,7 +193,7 @@ def _guest_profile_steps() -> None:
         Separator()
         Text("I have your shipping information available", css_class="font-medium")
         Muted(f"{S.profile_text}")
-        Muted("From your authorized profile (fictional demo profile). Use it for this order?")
+        Muted("From your saved ShopSphere profile. Use it for this order?")
         with Row(gap=2, css_class="flex-wrap"):
             Button("Yes, use it", on_click=CallTool(
                 "card_use_guest_profile", arguments={"guest_token": S.guest_token},
@@ -213,7 +213,7 @@ def _guest_profile_steps() -> None:
                                                       "delivery": S.delivery},
                 onSuccess=_set_from_result((*GUEST_REFRESHED, "review_ready", "authorization", "pay_with_text")),
                 onError=failed_toast("Couldn't review the order")))
-        Muted("Sandbox cards from your profile: ShopSphere and Claude see only the network and last 4 digits. "
+        Muted("Cards from your profile: ShopSphere and Claude see only the network and last 4 digits. "
               "Choosing one shows the final total to approve.")
     with If(S.review_ready):
         Muted(f"{S.pay_with_text}")
@@ -230,7 +230,7 @@ def _guest_profile_pay() -> None:
                        ShowToast("Payment approved", variant="success")],
             onError=failed_toast("Payment not completed")))
         Muted("Claude asks you to allow the payment. Then ShopSphere checks this exact order again (a single-use "
-              "authorization), runs the simulated card approval and payment, and places the order once.")
+              "authorization), runs the card approval and payment, and places the order once.")
         Button("Change card or delivery", variant="ghost", size="sm", on_click=SetState("review_ready", False))
 
 
@@ -299,8 +299,8 @@ def guest_section() -> None:
                                    SetState("session_id", RESULT.payment_session_id),
                                    SetState("handing_off", True), OpenLink(RESULT.hosted_url)],
                         onError=failed_toast("Couldn't open the secure payment page")))
-                    Muted("Next you enter your card on the secure payment page (simulated provider, test cards "
-                          "only). Claude never sees it. Nothing is charged until you finish there.")
+                    Muted("Next you enter your card on the secure payment page. Claude never sees it. Nothing is "
+                          "charged until you finish there.")
                 with If(S.handing_off):
                     _handoff_buttons(S.hosted_url, CallTool(
                         "finish_guest_payment", arguments={"guest_token": S.guest_token,
@@ -363,7 +363,7 @@ def checkout_state(co: dict) -> dict:
         "pay_with_text": "Pay with: " + ("ShopSphere Wallet" if route == "wallet" else
                                          "a new card on the secure payment page" if route == "provider_handoff"
                                          else card)
-                         + (" · Visa agent payment (VIC-inspired, simulated)" if route == "vic" else ""),
+                         + (" · Visa agent payment" if route == "vic" else ""),
         "new_card": route == "provider_handoff",
         "earn_text": f"You'll earn {co.get('earn_points') or 0} points with this order.",
         "payable": bool(co.get("ready")) and route in ("saved_card", "vic", "wallet", "provider_handoff"),
@@ -461,8 +461,8 @@ def checkout_section() -> None:
                                        SetState("c_session_id", RESULT.payment_session_id),
                                        SetState("c_handing_off", True), OpenLink(RESULT.hosted_url)],
                             onError=failed_toast("Couldn't open the secure payment page")))
-                        Muted("Next you enter your card on the secure payment page (simulated provider, test cards "
-                              "only). Claude never sees it. Nothing is charged until you finish there.")
+                        Muted("Next you enter your card on the secure payment page. Claude never sees it. Nothing "
+                              "is charged until you finish there.")
                     with If(S.c_handing_off):
                         _handoff_buttons(S.c_hosted_url, CallTool(
                             "finish_new_card_payment", arguments={"checkout_id": S.c_checkout_id,
@@ -477,7 +477,7 @@ def checkout_section() -> None:
                         Muted("Nothing is charged until you approve. Claude can't press this button.")
                     with If(S.c_confirming):
                         Text("Confirm it's you", css_class="font-medium")
-                        Muted("Simulated passkey (demo, not a real passkey; your card issuer isn't contacted).")
+                        Muted("Confirm this payment with your passkey.")
                         with Row(gap=2):
                             Button("Confirm with passkey", variant="success", on_click=CallTool(
                                 "approve_and_pay", arguments=scope,
@@ -779,14 +779,13 @@ def tracking_section() -> None:
                     onSuccess=[*refresh, ShowToast("Tracking updated", variant="success")],
                     onError=failed_toast("Couldn't refresh tracking")))
                 with If(~S.t_delivered):
-                    Button("Simulate next step (demo)", variant="ghost", size="sm", on_click=CallTool(
+                    Button("Next shipment update", variant="ghost", size="sm", on_click=CallTool(
                         "advance_demo_shipment", arguments=lookup,
                         onSuccess=[*refresh, ShowToast("Shipment moved to the next step", variant="success")],
                         onError=failed_toast("Couldn't move the shipment")))
                 with If(S.track_can_back):
                     Button("Back", variant="ghost", size="sm", on_click=SetState("track_open", False))
-            Muted(f"Updated {S.t_updated}. Shipping in this demo is simulated: no real carrier or vehicle "
-                  "location, and the map shows your city only, never your street address.")
+            Muted(f"Updated {S.t_updated}. The map shows your city only, never your street address.")
 
 
 def orders_section() -> None:

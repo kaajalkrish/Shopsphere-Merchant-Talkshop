@@ -149,6 +149,8 @@ def approve(token: str):
                       request=f"{row.checkout_id} v{row.checkout_version} {row.currency} {row.amount_cents / 100:.2f}",
                       response="Approval recorded for this single authorization (simulated passkey; no issuer contacted)",
                       pattern="AP2-style human-present confirmation (concept only)")
+            pt.resolve(correlation=row.checkout_id, operations=(pt.STEP_UP,), status="success",
+                       outcome="Customer approved on ShopSphere's approval page (simulated passkey)")
     return _page("Approved", "<h1>Approved</h1><p class=ok>Thanks. Go back to Claude and say you've approved it; "
                              "Claude then places the order once.</p>")
 
@@ -165,4 +167,6 @@ def decline(token: str):
                       trace_id=pt.trace_id_for(row.owner_id), correlation=row.checkout_id,
                       request=row.checkout_id, response="Nothing approved, charged or ordered", status="info",
                       pattern="AP2-style human-present confirmation (concept only)")
+            pt.resolve(correlation=row.checkout_id, operations=pt.AUTH_WAITS, status="info",
+                       outcome="Declined by the customer on the approval page; nothing charged")
     return _page("Declined", "<h1>Declined</h1><p>Nothing was charged and no order was placed.</p>")

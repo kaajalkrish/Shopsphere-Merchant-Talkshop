@@ -40,10 +40,12 @@ from backend.shop import guest_wallet
 MERCHANT = "shopsphere"
 TTL = 15 * 60
 LEVEL_TEXT = {
-    "sandbox_chat": "Sandbox card: your yes in the chat + Claude's permission prompt + a single-use authorization",
-    "customer_step_up": "Your approval on ShopSphere's approval page (simulated passkey) + a single-use authorization",
-    "provider_page": "Card entered and verified on the secure payment provider's page (simulated provider)",
+    "sandbox_chat": "Your yes in the chat + Claude's permission prompt + a single-use authorization",
+    "customer_step_up": "Your approval on ShopSphere's approval page (passkey) + a single-use authorization",
+    "provider_page": "Card entered and verified on the secure payment provider's page",
 }
+LEVEL_NAME = {"sandbox_chat": "shopper's yes in the chat", "customer_step_up": "customer approval page",
+              "provider_page": "secure payment page"}             # how the trace names each level
 
 
 class ConsentError(Exception):

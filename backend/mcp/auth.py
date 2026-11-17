@@ -308,8 +308,10 @@ def _trace_discovery(methods: list, wanted: set, auth_user: Optional[str], calls
         pt.record(pt.MCP_SERVER, "ShopSphere OAuth server", pt.OAUTH, "Bearer token verified", trace_id=target,
                   request=f"tools/call {', '.join(sorted(wanted & CUSTOMER_TOOLS))}",
                   response="Signed access token valid for this connector address (audience checked)")
+        pt.resolve(trace_id=target, operations=(pt.SIGN_IN_CHALLENGE,), status="success",
+                   outcome="Signed in; Claude retried with a valid token")
     if challenged:
-        pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.OAUTH, "Sign-in required (HTTP 401 challenge)", trace_id=target,
+        pt.record(pt.MCP_SERVER, pt.CLAUDE, pt.OAUTH, pt.SIGN_IN_CHALLENGE, trace_id=target,
                   request=f"tools/call {', '.join(sorted(t for t in wanted if t))} without a valid token",
                   response="401 + WWW-Authenticate → Claude opens ShopSphere's sign-in page", status="pending")
 

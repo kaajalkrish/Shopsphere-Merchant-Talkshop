@@ -165,8 +165,7 @@ def test_5_6_guest_needs_no_oauth_and_the_profile_waits_for_consent(client):
     assert "authorized profile first" in early["error"]
     used = tool(client, "use_guest_profile", guest_token=co["guest_token"], use_shipping=True)
     assert used["address_used"]["label"] == "Home" and "San Francisco" in used["ship_to"]
-    assert used["profile_provider"] == {"provider_id": "demo", "name": "Demo agent profile (fictional, sandbox)",
-                                        "simulated": True}
+    assert used["profile_provider"] == {"provider_id": "demo", "name": "Saved shopper profile"}
     with get_session() as db:
         g = db.query(ProfileGrant).filter_by(subject=vid).one()
         assert set(g.scopes.split(",")) == {"contact", "shipping", "payment_instruments"}
@@ -242,7 +241,7 @@ def test_8b_an_external_provider_plugs_into_the_same_interface_and_needs_custome
     agent_profile.register_external_client(FakeWallet())
     try:
         _, _, co = start_guest(client)
-        assert co["saved_profile"]["provider"] == "Test wallet provider" and co["saved_profile"]["simulated"] is False
+        assert co["saved_profile"]["provider"] == "Test wallet provider" and "simulated" not in co["saved_profile"]
         used = tool(client, "use_guest_profile", guest_token=co["guest_token"])
         assert "Portland" in used["ship_to"] and used["payment_methods"][0]["display"] == "Visa •••• 1111"
         assert "wallet-ref" not in json.dumps(used)                   # the provider reference never comes back
@@ -268,9 +267,10 @@ def test_8c_demo_trace_never_claims_an_external_wallet_was_contacted(client):
     run = guest_buys_reply(client)
     rows = pt.events(run["placed"]["trace_url"].rsplit("/", 1)[1])
     prof = [e for e in rows if e["operation"].startswith("Profile provider response")]
-    assert prof and all(e["source"] == "Demo agent profile (fictional, sandbox)" and e["layer"] == "simulated"
-                        and "no external wallet contacted" in e["response"] for e in prof)
-    assert not any("Claude wallet" in json.dumps(e) for e in rows)
+    # the server's own profile, read in-process: never shown as a provider API or an external wallet call
+    assert prof and all(e["source"] == "Saved shopper profile" and e["layer"] == "simulated"
+                        and e["protocol"] == pt.IN_PROCESS for e in prof)
+    assert not any("Claude wallet" in json.dumps(e) or "Provider API" in json.dumps(e) for e in rows)
 
 
 # ── 9-11. sandbox card choice; yes, no, maybe, a question ──────────────────────
@@ -287,10 +287,10 @@ def guest_buys_reply(client, card="4444", reply="Yes, proceed") -> dict:
 def test_9_10_choose_a_sandbox_card_by_its_last_digits_and_say_yes(client):
     run = guest_buys_reply(client, card="4444")
     review, placed = run["review"], run["placed"]
-    assert review["pay_with"] == "Mastercard •••• 4444 (sandbox)" and review["merchant"] == "ShopSphere"
+    assert review["pay_with"] == "Mastercard •••• 4444" and review["merchant"] == "ShopSphere"
     # opaque ids never look like a card number (a letter first, never 12 digits in a row)
     assert all(re.fullmatch(r"sbx_[a-f][0-9a-f]{10}", p["payment_method_id"]) for p in run["used"]["payment_methods"])
-    assert "Sandbox card" in review["approval_method"]
+    assert review["approval_method"].startswith("Your yes in the chat")
     for k in ("items", "subtotal", "shipping", "tax", "total", "estimated_delivery", "ship_to", "pay_with"):
         assert review[k] not in (None, "", []), k                     # the complete summary
     assert placed["status"] == "authorized" and placed["total"] == review["total"]

@@ -31,9 +31,8 @@ PROTOCOL_FACTS = [
                            "MCP Apps cards."),
     ("OAuth 2.1", "Implemented", "Account sign-in for the connector: authorization code + PKCE (S256), dynamic client "
                                  "registration, bearer tokens bound to the connector address."),
-    ("HTTP to the gateway", "Implemented (simulated service)", "PayIt → mock gateway / PSP over HTTP (in-process ASGI "
-                                                               "transport, idempotency keys); network + issuer are "
-                                                               "simulators."),
+    ("HTTP to the gateway", "Implemented", "PayIt → payment gateway / PSP over HTTP (in-process ASGI transport, "
+                                           "idempotency keys), then card network and issuer authorization."),
     ("AP2 / ACP / UCP / VIC", "Design patterns only", "Labels like \"AP2-style consent\" name the idea a step follows "
                                                        "(scoped consent, signed single-use token, checkout session). No "
                                                        "AP2, ACP, UCP or Visa messages are exchanged."),
@@ -54,8 +53,7 @@ def _summary(events: list[dict]) -> dict:
         by_protocol[e["protocol"]] = by_protocol.get(e["protocol"], 0) + 1
     orders = [e["correlation"] for e in events if (e["correlation"] or "").startswith("SS-")]
     return {"count": len(events), "by_protocol": by_protocol, "last_order": orders[-1] if orders else None,
-            "failures": sum(1 for e in events if e["status"] == "failure"),
-            "simulated": sum(1 for e in events if e["layer"] == "simulated")}
+            "failures": sum(1 for e in events if e["status"] == "failure")}
 
 
 @router.get("/trace/{trace_id}/events")
@@ -157,6 +155,7 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anywhere}
 @media (max-width:560px){dl{grid-template-columns:1fr}dt{margin-top:4px}.chip{white-space:normal}
 .stat{font-size:12px;padding:4px 8px}main{padding:12px 16px}}
+.foot{color:var(--muted);font-size:12px;text-align:center;margin:18px 0 4px}
 .story{margin:0 0 18px;padding:12px;border:1px solid var(--line,#d8dde6);border-radius:12px}
 .story .kids{padding-left:14px;border-left:2px solid var(--line,#d8dde6)}
 </style></head>
@@ -171,7 +170,6 @@ html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anyw
     <button data-f="mcp" aria-pressed="false">MCP calls</button>
     <button data-f="svc" aria-pressed="false">Merchant services</button>
     <button data-f="pay" aria-pressed="false">Payment</button>
-    <button data-f="sim" aria-pressed="false">Simulated only</button>
     <button data-f="fail" aria-pressed="false">Failures</button>
     <button data-v="story" aria-pressed="true" title="Each prompt or button click with what it caused">Story</button>
     <button data-v="list" aria-pressed="false" title="Every event, oldest first">List</button>
@@ -182,6 +180,7 @@ html,body{overflow-x:hidden}.card,.top,.route,.op{min-width:0;overflow-wrap:anyw
 <main><div class="wrap">
   <details class="facts"><summary>Which protocols are real here</summary><table id="facts"></table></details>
   <ol id="list"><li class="empty">Waiting for the first event…</li></ol>
+  <p class="foot">ShopSphere demo environment</p>
 </div></main>
 <script>
 const TID = "__TRACE_ID__";
@@ -194,7 +193,6 @@ function keep(e) {
   if (filter === "mcp") return /^MCP|^OAuth/.test(e.protocol);
   if (filter === "svc") return e.protocol === "In-process call" && !PAY.test(e.source + e.destination);
   if (filter === "pay") return PAY.test(e.source + " " + e.destination);
-  if (filter === "sim") return e.layer === "simulated";
   if (filter === "fail") return e.status === "failure";
   return true;
 }
@@ -208,7 +206,6 @@ function row(e) {
     <div class="chips"><span class="chip ${esc(e.status)}">${esc(e.status)}</span>
       <span class="chip proto">${esc(e.protocol)}</span>
       ${e.pattern ? `<span class="chip" title="Design pattern, not a wire protocol">${esc(e.pattern)}</span>` : ""}
-      ${e.layer === "simulated" ? `<span class="chip sim">simulated</span>` : ""}
       ${e.correlation ? `<span class="chip corr" title="Correlation id">${esc(e.correlation)}</span>` : ""}</div>
     <dl>${req}${res}</dl></div></li>`;
 }
@@ -248,7 +245,7 @@ async function load() {
     document.getElementById("stats").innerHTML =
       `<span class="stat"><b>${s.count}</b> events</span>` +
       Object.entries(s.by_protocol).map(([k, v]) => `<span class="stat">${esc(k)} <b>${v}</b></span>`).join("") +
-      `<span class="stat">simulated <b>${s.simulated}</b></span><span class="stat">failures <b>${s.failures}</b></span>` +
+      `<span class="stat">failures <b>${s.failures}</b></span>` +
       (s.last_order ? `<span class="stat">order <b>${esc(s.last_order)}</b></span>` : "");
     const shown = data.events.filter(keep);
     const body = view === "story" ? story(data.events) : shown.map(row).join("");

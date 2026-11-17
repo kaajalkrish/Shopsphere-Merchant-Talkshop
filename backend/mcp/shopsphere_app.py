@@ -57,7 +57,7 @@ from backend.mcp.auth import (current_customer, issue_purchase_authorization, is
                               public_base_url, read_purchase_authorization, read_visitor_cart, visitor_cart_id)
 from backend.observability import protocol_trace as pt
 from backend.shop import agent_profile, card_approval, discovery, notifications, offer_preview, payment_routing, \
-    profile, purchase_consent, ratelimit
+    profile, purchase_consent, ratelimit, wording
 from backend.shop.purchase_consent import ConsentError
 from backend.shop import cart as cart_service
 from backend.shop import guest_checkout as guest_service
@@ -132,15 +132,14 @@ Buying ("let's buy it", "I'll take it"):
      checkout, update_checkout_choices, finish_new_card_payment or my_orders for a guest.
 7. Guest checkout (pass guest_token every time):
    a. If saved_profile.available, ask saved_profile.ask (e.g. "I have a shipping address available in
-      San Francisco, CA. Would you like me to use it for this order?"). Say it's a fictional demo
-      profile when saved_profile.simulated is true. It is NOT the shopper's Claude account or wallet.
-      Yes → use_guest_profile(use_shipping=true). If saved_profile.consented is already true, don't
+      San Francisco, CA. Would you like me to use it for this order?"). Call it "your saved
+      ShopSphere profile"; it is NOT the shopper's Claude account or wallet. Yes → use_guest_profile(use_shipping=true). If saved_profile.consented is already true, don't
       ask again. No → ask ONCE for name, email and shipping address, call update_guest_checkout, then
       use_guest_profile(use_shipping=false) for the payment methods.
       No profile available → ask once for those details (update_guest_checkout) and use
       payment_method_id="provider": the card is typed on the secure payment page, never in the chat.
-   b. Tell the address used, the estimated delivery and the payment methods (e.g. "Visa •••• 4242
-      (sandbox)") and ask which to use. "Ship it to my work address" → use_guest_profile(address_id).
+   b. Tell the address used, the estimated delivery and the payment methods (e.g. "Visa •••• 4242")
+      and ask which to use. "Ship it to my work address" → use_guest_profile(address_id).
    c. review_order(guest_token, payment_method_id, delivery). Show the summary: items with size,
       quantity and price, discounts, shipping, tax, total, estimated delivery, ship-to and the card.
       Ask: "Do you authorize me to place this order?"
@@ -165,7 +164,10 @@ Buying ("let's buy it", "I'll take it"):
    you chat messages; only answer what the shopper types.
 11. "Where's my order?": signed-in customers → my_orders. Guests → ask for the Order ID and the
    email used at checkout, then track_order. Add at most one short sentence to the tracking card.
-Payments, card networks, issuers, the demo profile and its sandbox cards are simulated.
+Describe cards, payments and the profile the way the tools do (e.g. "Visa •••• 4242", "your saved
+ShopSphere profile"), without adding labels of your own, and never claim a bank, card network or
+wallet was contacted beyond what a tool returned. If the shopper asks whether this is a real payment,
+answer honestly: this is ShopSphere's demo environment and no real money moves.
 """
 
 mcp = FastMCP("ShopSphere", instructions=INSTRUCTIONS)
@@ -916,7 +918,7 @@ def checkout(line_ids: Optional[list[str]] = None, delivery: Optional[str] = Non
                  "saved_payment_methods": [{"payment_method_id": c["payment_method_id"], "display": c["display"],
                                             "issuer": c.get("issuer_display")} for c in co.get("saved_payment_methods") or []],
                  "next_step": "The shopper can change address, card, delivery or points on the card (or ask you: call "
-                              "update_checkout_choices), then approves on the card (Approve & pay, then the simulated "
+                              "update_checkout_choices), then approves on the card (Approve & pay, then the "
                               "passkey). Never say the order is paid unless they tell you it went through."})
     return _ui(view, state, data)
 
@@ -965,8 +967,8 @@ def update_checkout_choices(checkout_id: str, address_id: Optional[str] = None, 
 @cards.tool()
 async def approve_and_pay(checkout_id: str, checkout_version: int, final_amount: float, currency: str = "USD") -> dict:
     """App-only: the shopper pressed Confirm with passkey on the checkout card. Runs the same
-    approval and payment as the website: scoped consent for this exact order, the simulated
-    passkey, then the simulated gateway. The model can't call this."""
+    approval and payment as the website: scoped consent for this exact order, the passkey, then
+    the payment gateway. The model can't call this."""
     user = current_customer()
     try:
         res = await _pay(user, checkout_id, checkout_version, final_amount, currency, consent_mode="button")
@@ -1024,7 +1026,7 @@ def _trace_engine(res: dict, correlation: Optional[str]) -> None:
 async def start_new_card_payment(checkout_id: str, checkout_version: int, final_amount: float,
                                  currency: str = "USD") -> dict:
     """App-only: the shopper tapped Approve & pay for a new card. Records their scoped consent for
-    this exact order and opens a session on the (simulated) secure payment provider's page, where
+    this exact order and opens a session on the secure payment provider's page, where
     the card is typed. Returns that page's address. The model can't call this."""
     user = current_customer()
     with Session(get_engine()) as db:
@@ -1071,6 +1073,12 @@ async def _open_secure_page(user, checkout_id: str, checkout_version: int, final
             "payment_session_id": res["payment_session_id"], "expires_at": res.get("expires_at")}
 
 
+def _secure_page_done(order_id: Optional[str]) -> None:
+    """The call that sent the shopper to the secure payment page stops showing as waiting."""
+    pt.resolve(trace_id=pt.current(), operations=pt.SECURE_PAGE_CALLS, status="success",
+               outcome=f"Card verified on the secure payment page; paid as order {order_id}")
+
+
 @cards.tool(model=True)
 async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional[str] = None) -> dict:
     """After the shopper finished on the secure payment page: ShopSphere asks the payment provider
@@ -1094,6 +1102,7 @@ async def finish_new_card_payment(checkout_id: str, payment_session_id: Optional
     if res.get("status") != "authorized":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
     order = res.get("order") or {}
+    _secure_page_done(order.get("order_id"))
     return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
             "arrives": order.get("delivery_date"), "email": res.get("confirmation_email")}
 
@@ -1236,12 +1245,11 @@ def _profile_offer(subject: Optional[str]) -> dict:
     with Session(get_engine()) as db:
         g = agent_profile.active_grant(db, subject, prov.provider_id) if subject else None
     area = areas[0] if areas else "your saved address"
-    return {"available": True, "provider": prov.name, "simulated": prov.simulated,
+    return {"available": True, "provider": prov.name,
             "consented": "shipping" in agent_profile.scopes(g),
             "address_areas": areas, "payment_networks": preview.get("payment_networks") or [],
-            "ask": f"I have a shipping address available in {area}"
-                   + (" (from the fictional demo profile)" if prov.simulated else "")
-                   + ". Would you like me to use it for this order?"}
+            "ask": f"I have a shipping address available in {area} from your saved ShopSphere profile. "
+                   "Would you like me to use it for this order?"}
 
 
 @cards.tool(model=True)
@@ -1313,7 +1321,7 @@ def _use_profile(guest_token: str, use_shipping: bool, address_id: Optional[str]
                        ". The assistant sees network + last 4 only",
               pattern="Simulated PSP tokens" if prov.simulated else "Tokenized credential references")
     return {**_order_summary(co), "shipping_from_profile": bool(chosen), "pay_with": "not chosen yet",
-            "ready": False, "profile_provider": prov.describe(),
+            "ready": False, "profile_provider": {"provider_id": prov.provider_id, "name": prov.name},
             "address_used": ({"address_id": chosen.address_id, "label": chosen.label, "display": chosen.display()}
                              if chosen else None),
             "addresses": [{"address_id": a.address_id, "label": a.label, "area": a.area()} for a in addresses],
@@ -1460,12 +1468,14 @@ def _review(guest_token: Optional[str], checkout_id: Optional[str], payment_meth
               response=f"Live stock + price + offers + tax + shipping recomputed: total ${snap['total']:.2f}, version "
                        f"{snap['checkout_version']}, delivery {summary['estimated_delivery']}"
                        + ("" if snap["ready"] else f"; not ready: {', '.join(summary['issues'])}"),
-              status="success" if snap["ready"] else "pending", pattern="ACP-style update checkout", correlation=cid)
+              status="success" if snap["ready"] else "info", pattern="ACP-style update checkout", correlation=cid)
     if not snap["ready"]:
         return {**summary, "next_step": "Not ready to authorize yet: " + "; ".join(summary["issues"])}
     with Session(get_engine()) as db:
         row = purchase_consent.issue(db, uid, snap, guest)
         consent_id, pay_ref, level = row.consent_id, row.pay_ref, row.level
+    pt.resolve(correlation=cid, operations=pt.AUTH_WAITS, status="info",
+               outcome="Replaced by a newer request (the order was reviewed again); never used, nothing charged")
     auth = issue_purchase_authorization(uid, cid, snap["checkout_version"], snap["total"], snap["currency"],
                                         snap["checkout_hash"], pay_ref, consent_id=consent_id,
                                         merchant=purchase_consent.MERCHANT)
@@ -1473,7 +1483,7 @@ def _review(guest_token: Optional[str], checkout_id: Optional[str], payment_meth
               request="Exact order terms to show the shopper",
               response=f"Single-use request (15 min) bound to ShopSphere, {cid} v{snap['checkout_version']}, "
                        f"{snap['currency']} {snap['total']:.2f}, {summary['pay_with']}, order fingerprint; proof "
-                       f"needed: {level}",
+                       f"needed: {purchase_consent.LEVEL_NAME[level]}",
               status="pending", pattern="AP2-style intent → cart mandate (concept only)", correlation=cid)
     return {**summary, "merchant": "ShopSphere", "authorization": auth, "authorization_expires_in_minutes": 15,
             "approval_method": purchase_consent.LEVEL_TEXT[level],
@@ -1491,8 +1501,8 @@ async def place_order(authorization: str, customer_reply: str, guest_token: Opti
     yes to review_order's summary. customer_reply: the shopper's answer, word for word (e.g. "Yes,
     proceed"); anything that isn't a clear yes is refused. ShopSphere checks the single-use authorization
     against the live order (merchant, version, total, currency, payment method, fingerprint; any change
-    means review_order again). A sandbox card is then paid (simulated); a real-world credential (a
-    customer's saved card, the Wallet) first needs the customer's own approval on ShopSphere's approval
+    means review_order again). A card from the guest's saved ShopSphere profile is then paid; a
+    customer's saved card or the Wallet first needs the customer's own approval on ShopSphere's approval
     page: the result is approval_required with a link, and after they approve you call place_order again.
     A new card is verified on the secure payment page. The order is created once; a retry never charges
     twice. Guests: guest_token; customers: checkout_id."""
@@ -1531,6 +1541,11 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
             pt.record(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, "Purchase authorization refused",
                       request=f"Authorization for {cid}", response=f"{exc.code}: nothing charged", status="failure",
                       pattern="AP2-style scoped consent (concept only)", correlation=cid)
+            if exc.code in ("AUTH_EXPIRED", "AUTH_MISMATCH"):          # that request can't be used any more
+                pt.resolve(correlation=cid, operations=pt.AUTH_WAITS, status="failure",
+                           outcome=("Expired before it was used" if exc.code == "AUTH_EXPIRED" else
+                                    "The order changed after it was requested, so it was refused") +
+                                   "; nothing charged")
             raise ToolError(exc.message)
         if reply not in ("yes", "card_button"):
             pt.record(pt.CLAUDE, pt.MCP_SERVER, pt.MCP, "Shopper's reply isn't a clear yes",
@@ -1553,7 +1568,7 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
             return {"status": "approval_required", "approval_page": link, "charged": False,
                     "approval_method": purchase_consent.LEVEL_TEXT[level],
                     "next_step": "Give the shopper this link to approve the payment themselves (it shows the exact "
-                                 "order; the passkey there is simulated). When they say they approved it, call "
+                                 "order and asks for their passkey). When they say they approved it, call "
                                  "place_order again with the same authorization and their reply."}
         try:
             purchase_consent.consume(db, row)
@@ -1563,8 +1578,13 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
                   request=("Shopper tapped Approve & pay on the card" if via_card else
                            f"Shopper's reply: clear yes; Claude's permission prompt allowed") +
                           f"; authorization for {cid} v{row.checkout_version} {row.currency} {row.amount_cents / 100:.2f}",
-                  response=f"Matches the live order; single-use authorization consumed ({level})",
+                  response=f"Matches the live order; single-use authorization consumed "
+                           f"({purchase_consent.LEVEL_NAME[level]})",
                   pattern="AP2-style scoped consent (concept only)", correlation=cid)
+        pt.resolve(correlation=cid, operations=pt.AUTH_WAITS, status="success",
+                   outcome=("Approved by the shopper's Approve & pay tap" if via_card else
+                            "Approved by the shopper's clear yes in the chat") +
+                           (" and the approval page" if level == "customer_step_up" else "") + "; used once")
         version, amount, currency = row.checkout_version, row.amount_cents / 100, row.currency
     try:
         res = await _pay(user, cid, version, amount, currency, consent_mode="button" if via_card else "typed",
@@ -1610,7 +1630,7 @@ async def _place(authorization: str, customer_reply: str, guest_token: Optional[
 _EMAIL_NOTE = {"sending": "The confirmation email is on its way.",
                "sent": "The confirmation email was sent.",
                "failed": "We couldn't send the confirmation email; the order is placed. Track it with the Order ID.",
-               "outbox": "Email sending isn't set up on this server, so the confirmation is kept in ShopSphere's demo "
+               "outbox": "Email sending isn't set up on this server, so the confirmation is kept in ShopSphere's "
                          "outbox (not delivered)."}
 
 
@@ -1635,6 +1655,8 @@ def decline_order(guest_token: Optional[str] = None, checkout_id: Optional[str] 
               request=(reason or "Shopper said no")[:120], response="Nothing approved, charged or ordered; the "
               "authorization request is void", status="info", pattern="AP2-style consent (concept only)",
               correlation=cid)
+    pt.resolve(correlation=cid, operations=pt.AUTH_WAITS, status="info",
+               outcome="Declined by the shopper in the chat; nothing charged")
     return {"status": "not_placed", "charged": False, "order_created": False,
             "next_step": "Tell the shopper nothing was ordered or charged. Their cart is kept."}
 
@@ -1693,6 +1715,7 @@ async def finish_guest_payment(guest_token: str, payment_session_id: Optional[st
     if res.get("status") != "authorized":
         raise ToolError(res.get("message") or f"Payment {res.get('status')}. Nothing was charged.")
     order = res.get("order") or {}
+    _secure_page_done(order.get("order_id"))
     with Session(get_engine()) as db:
         row = db.query(Order).filter_by(order_id=order.get("internal_order_id")).first()
         mail = (notifications.confirmation_for(db, row) if row else None) or {}
@@ -1701,7 +1724,7 @@ async def finish_guest_payment(guest_token: str, payment_session_id: Optional[st
             "sent": "The confirmation email was sent.",
             "failed": "We couldn't send the confirmation email; your order is placed. Track it with your Order ID.",
             }.get(delivery, "Email sending isn't set up on this server, so the confirmation is kept in "
-                            "ShopSphere's demo outbox (not delivered).")
+                            "ShopSphere's outbox (not delivered).")
     return {"status": "authorized", "order_id": order.get("order_id"), "total": order.get("total"),
             "arrives": order.get("delivery_date"), "guest": True, "sent_to": _mask_email(mail.get("to")),
             "email_delivery": delivery or "none", "email_note": note,
@@ -1801,9 +1824,9 @@ def order_status(order_id: str, email: Optional[str] = None) -> dict:
 
 @cards.tool()
 def advance_demo_shipment(order_id: str, email: Optional[str] = None) -> dict:
-    """App-only demo control ("Simulate next step" on the tracking card): moves this order's
-    simulated shipment one step, like the Track Order page's demo control on the website. The same
-    lookup as tracking (own order, or Order ID + checkout email). No real carrier is involved."""
+    """App-only: "Next shipment update" on the tracking card moves this order's shipment one step,
+    like the Track Order page's control on the website. The same lookup as tracking (own order, or
+    Order ID + checkout email)."""
     from backend.shop import shipping
     with Session(get_engine()) as db:
         order = _find_tracked(db, order_id, email)
@@ -1920,6 +1943,19 @@ def _trace_for_call(args: dict) -> Optional[str]:
     return pt.trace_id_for(vid) if vid else None
 
 
+def _neutral_result(result):
+    """What Claude and the card show names each part by its role (backend/shop/wording.py)."""
+    try:
+        for block in getattr(result, "content", None) or []:
+            if isinstance(getattr(block, "text", None), str):
+                block.text = wording.neutral_json_text(block.text)
+        if isinstance(getattr(result, "structured_content", None), dict):
+            result.structured_content = wording.neutral_value(result.structured_content)
+    except Exception as exc:                           # wording must never break a tool call
+        print(f"[wording] result left as is: {type(exc).__name__}", flush=True)
+    return result
+
+
 class _TraceToolCalls(Middleware):
     """Records each tools/call Claude makes (request + response summary, status, timing); the
     services the tool used add their own rows inside it (see protocol_trace)."""
@@ -1943,7 +1979,10 @@ class _TraceToolCalls(Middleware):
             response = _result_summary(data)
             if isinstance(data, dict) and data.get("status") in ("verification_required", "provider_handoff"):
                 status = "pending"
-            return result
+            return _neutral_result(result)
+        except ToolError as exc:
+            status, response = "failure", str(exc)[:300]
+            raise ToolError(wording.neutral(str(exc))) from exc
         except Exception as exc:
             status, response = "failure", str(exc)[:300]
             raise

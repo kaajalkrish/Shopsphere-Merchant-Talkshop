@@ -198,10 +198,10 @@ def check_tracking_screen(ui: CardDriver, order_id: str, back_to: str | None = N
     assert ui.state["t_tracking_id"] == "Assigned when your parcel ships"
     assert ui.state["t_lines"] and ui.state["t_lines"][0]["label"] in shown
     assert all(ln["photo"].startswith("data:image/jpeg") for ln in ui.state["t_lines"])  # product photos
-    assert "Simulated" in shown or "simulated" in shown
-    ui.click("Simulate next step (demo)")
+    assert not re.search(r"(?i)simulat|sandbox|demo", shown)              # each part named by its role
+    ui.click("Next shipment update")
     assert ui.tool_calls[-1] == "advance_demo_shipment" and ui.state["t_badge"] == "Packed"
-    ui.click("Simulate next step (demo)")
+    ui.click("Next shipment update")
     shown = ui.texts()
     assert ui.state["t_badge"] == "Shipped" and re.fullmatch(r"TRK\d{6}", ui.state["t_tracking_id"])
     assert f"Handed to the carrier · Tracking ID {ui.state['t_tracking_id']}." in shown
@@ -293,9 +293,9 @@ def test_product_card_add_view_cart_guest_checkout_pay_and_track_all_in_one_card
     assert card.state["t_badge"] == "Shipped" and "Austin, TX" in card.texts()   # moved on in the first card
     assert "Back" not in card.buttons() and "Delivered" in card.texts()
     for _ in range(2):
-        card.click("Simulate next step (demo)")
+        card.click("Next shipment update")
     assert card.state["t_delivered"] and card.state["t_headline"].startswith("Delivered")
-    assert "Simulate next step (demo)" not in card.buttons() and "Delivered to Austin, TX." in card.texts()
+    assert "Next shipment update" not in card.buttons() and "Delivered to Austin, TX." in card.texts()
     wrong, structured = card_of(client, "track_order", order_id=order_id, email="someone@else.net")
     assert wrong == {"found": False, "message": wrong["message"]}
     lost = CardDriver(client, structured)
@@ -349,11 +349,11 @@ def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_for
     ui.click("Yes, use it")
     assert ui.tool_calls[-1] == "card_use_guest_profile" and ui.state["profile_used"]
     assert "Ship to: Jordan Lee, San Francisco, CA 94105" in ui.texts()
-    assert {"Visa •••• 4242 (sandbox)", "Mastercard •••• 4444 (sandbox)"} <= set(ui.buttons())
+    assert {"Visa •••• 4242", "Mastercard •••• 4444"} <= set(ui.buttons())
     ui.fill(delivery="express")
-    ui.click("Visa •••• 4242 (sandbox)")
+    ui.click("Visa •••• 4242")
     assert ui.tool_calls[-1] == "card_review_guest_order" and ui.state["review_ready"]
-    assert "Pay with: Visa •••• 4242 (sandbox)" in ui.texts() and "Delivery: Express" in ui.texts()
+    assert "Pay with: Visa •••• 4242" in ui.texts() and "Delivery: Express" in ui.texts()
     ui.click(f"Approve & pay {ui.state['total_text']}")
     assert ui.tool_calls[-1] == "card_place_guest_order" and ui.state["paid"] and ui.sign_in_requests == 0
     order_id = ui.state["order_ref"]

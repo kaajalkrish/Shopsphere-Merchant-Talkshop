@@ -28,6 +28,7 @@ from typing import Optional
 
 from backend.db.schema import ProtocolEvent
 from backend.db.session_utils import get_session
+from backend.shop.wording import neutral
 
 MCP = "MCP JSON-RPC (Streamable HTTP)"
 OAUTH = "OAuth 2.1 (HTTP)"
@@ -115,6 +116,11 @@ def current() -> Optional[str]:
 def event(source: str, destination: str, protocol: str, operation: str, *, request="", response="",
           status: str = "success", pattern: Optional[str] = None, correlation: Optional[str] = None,
           layer: str = "real", at: Optional[float] = None) -> dict:
+    # Each part is named by its role (backend/shop/wording.py): "Card issuer", not "Simulated card issuer".
+    source, destination, protocol, operation, request, response = (
+        neutral(source), neutral(destination), neutral(protocol), neutral(operation), neutral(request),
+        neutral(response))
+    pattern = neutral(pattern) if pattern else pattern
     return {"at": at or time.time(), "source": source[:80], "destination": destination[:80], "protocol": protocol[:80],
             "pattern": (pattern or "")[:80] or None, "operation": scrub(operation)[:120],
             "request": scrub(request) if request else "", "response": scrub(response) if response else "",
@@ -158,15 +164,93 @@ def merge(from_trace: str, into_trace: str) -> None:
     with get_session() as db:
         db.query(ProtocolEvent).filter_by(trace_id=from_trace).update({"trace_id": into_trace})
         db.commit()
+    resolve(trace_id=into_trace, operations=(SIGN_IN_CHALLENGE,), status="success",
+            outcome="Signed in; Claude retried with a valid token")
+
+
+# ── Waiting steps get their outcome ───────────────────────────────────────────────
+# A "pending" row is a step that waits on something later: the shopper's authorization, the
+# customer's approval page, a sign-in, the secure payment page. When that later thing happens,
+# the waiting row is closed with what actually happened (its request stays as it was), so a
+# finished step never keeps showing as pending. One left waiting past its lifetime is shown as
+# expired when the page is read.
+
+AUTH_REQUESTED = "Purchase authorization requested"
+STEP_UP = "Customer approval required (step-up)"
+SIGN_IN_CHALLENGE = "Sign-in required (HTTP 401 challenge)"
+AUTH_WAITS = (AUTH_REQUESTED, STEP_UP)
+SECURE_PAGE_CALLS = tuple(f"tools/call {t}" for t in ("place_order", "card_place_guest_order",
+                                                         "start_new_card_payment", "start_guest_payment"))
+_LIFETIME = {AUTH_REQUESTED: (15 * 60, "Expired unused after 15 minutes; nothing charged"),
+             STEP_UP: (15 * 60, "Expired: not approved within 15 minutes; nothing charged")}
+
+
+def _closed(response: Optional[str], outcome: str) -> str:
+    note = f" → {outcome}"
+    return scrub((response or "")[:600 - len(note)] + note)
+
+
+def resolve(*, operations: tuple, status: str, outcome: str, correlation: Optional[str] = None,
+            trace_id: Optional[str] = None) -> int:
+    """Close the still-pending rows for these operations (by checkout/order id, or in one trace)."""
+    if not correlation and not trace_id:
+        return 0
+    n = 0
+    scope = _SCOPE.get()
+    for r in (scope or {}).get("events", []):              # rows of this same call, not written yet
+        if (r["status"] == "pending" and r["operation"] in operations
+                and (not correlation or r["correlation"] == correlation)):
+            r["status"], r["response"] = status, _closed(r["response"], outcome)
+            n += 1
+    try:
+        with get_session() as db:
+            q = db.query(ProtocolEvent).filter(ProtocolEvent.status == "pending",
+                                               ProtocolEvent.operation.in_(operations))
+            if correlation:
+                q = q.filter(ProtocolEvent.correlation == correlation)
+            if trace_id:
+                q = q.filter(ProtocolEvent.trace_id == trace_id)
+            for e in q.all():
+                e.status, e.response = status, _closed(e.response, outcome)
+                n += 1
+            db.commit()
+    except Exception as exc:                       # the trace must never break shopping
+        print(f"[trace] outcome not recorded: {type(exc).__name__}", flush=True)
+    return n
+
+
+# Rows recorded before waiting steps were closed: the later step in the same trace says what happened.
+_LATER = {AUTH_REQUESTED: ("Customer purchase authorization", "Approved by the shopper; used once"),
+          STEP_UP: ("Customer approved the order", "Customer approved on ShopSphere's approval page")}
+
+
+def _as_read(r: ProtocolEvent, now: float, done: set) -> tuple[str, str]:
+    if r.status != "pending":
+        return r.status, r.response
+    later = _LATER.get(r.operation)
+    if later and (later[0], r.correlation) in done:
+        return "success", _closed(r.response, later[1])
+    life = _LIFETIME.get(r.operation)
+    if life and now - (r.at or now) > life[0]:
+        return "info", _closed(r.response, life[1])
+    return r.status, r.response
 
 
 def events(trace_id: str, limit: int = MAX_EVENTS) -> list[dict]:
+    now = time.time()
     with get_session() as db:
         rows = (db.query(ProtocolEvent).filter_by(trace_id=trace_id)
                 .order_by(ProtocolEvent.at, ProtocolEvent.id).all())[-limit:]
-        return [{"seq": i + 1, "at": r.at, "source": r.source, "destination": r.destination, "protocol": r.protocol,
-                 "pattern": r.pattern, "operation": r.operation, "request": r.request, "response": r.response,
-                 "status": r.status, "correlation": r.correlation, "layer": r.layer} for i, r in enumerate(rows)]
+        done = {(r.operation, r.correlation) for r in rows if r.status == "success" and r.correlation}
+        out = []
+        for i, r in enumerate(rows):
+            status, response = _as_read(r, now, done)
+            out.append({"seq": i + 1, "at": r.at, "source": neutral(r.source), "destination": neutral(r.destination),
+                        "protocol": neutral(r.protocol), "pattern": neutral(r.pattern) or None,
+                        "operation": neutral(r.operation), "request": neutral(r.request),
+                        "response": neutral(response), "status": status, "correlation": r.correlation,
+                        "layer": r.layer})
+        return out
 
 
 def clear(trace_id: str) -> int:

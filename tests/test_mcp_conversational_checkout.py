@@ -75,16 +75,16 @@ def test_b_guest_buys_in_a_conversation_with_an_authorized_profile_and_a_sandbox
     assert co["items"][0]["unit_price"] == run["shoe"]["price"] and run["added"]["delivery_estimate"]["standard"]
     # "I have your shipping information available…" comes from the configured profile, nothing else
     offer = co["saved_profile"]          # before consent: provider, city/state and networks only
-    assert offer["available"] and offer["simulated"] and offer["address_areas"][0] == "San Francisco, CA"
+    assert offer["available"] and "simulated" not in offer and offer["address_areas"][0] == "San Francisco, CA"
     assert "San Francisco, CA" in offer["ask"] and not offer["consented"]
     assert "Jordan" not in json.dumps(offer) and "500 Market" not in json.dumps(offer) and "@" not in json.dumps(offer)
     # "Yes" → delivery date + the configured sandbox cards, network + last 4 only
     assert profile["shipping_from_profile"] and "San Francisco" in profile["ship_to"]
     assert profile["estimated_delivery"] and [p["display"] for p in profile["payment_methods"]] == [
-        "Visa •••• 4242 (sandbox)", "Mastercard •••• 4444 (sandbox)"]
+        "Visa •••• 4242", "Mastercard •••• 4444"]
     assert not re.search(r"\d{12,}", json.dumps(profile)) and "tok_" not in json.dumps(profile)
     # the summary to authorize: the server's numbers
-    assert review["ready"] and review["pay_with"] == "Visa •••• 4242 (sandbox)" and review["authorization"]
+    assert review["ready"] and review["pay_with"] == "Visa •••• 4242" and review["authorization"]
     assert review["total"] == round(review["subtotal"] + review["shipping"] + review["tax"], 2)
     assert review["estimated_delivery"] == profile["estimated_delivery"]
     # "Yes, proceed" → the real order
@@ -262,9 +262,14 @@ def test_f_trace_shows_the_real_steps_in_order_without_secrets(client):
     assert any(e["layer"] == "simulated" for e in events)
     # honest labels: no A2A anywhere, protocol patterns qualified
     assert not any("A2A" in (e["protocol"] + (e["pattern"] or "")) for e in events)
-    assert all(re.search(r"style|inspired|concept|Simulated|SIMULATED|orchestration|Security|Idempotency|rules|"
-                         r"Internal|Order updates|profile|tokens|PaymentGatewayAdapter|Fictional|ShopSphere", e["pattern"])
+    assert all(re.search(r"style|inspired|concept|orchestration|Security|Idempotency|rules|Internal|Order updates|"
+                         r"profile|tokens|PaymentGatewayAdapter|ShopSphere|Hosted payment page|Payment|verification|"
+                         r"Passkey", e["pattern"])
                for e in events if e["pattern"])
+    shown = [" ".join(str(e[k] or "") for k in ("source", "destination", "protocol", "pattern", "operation", "request",
+                                                 "response")) for e in events]
+    leftover = [s for s in shown if re.search(r"(?i)simulat|sandbox|mock|fictional", s)]
+    assert not leftover, leftover                                        # each part named by its role
     facts = {p["name"]: p["status"] for p in data["protocols"]}
     assert facts["A2A"] == "Not implemented" and facts["MCP"] == "Implemented"
     # no secrets: tokens, card numbers, full emails, street address

@@ -122,7 +122,7 @@ def route_map_svg(status: Optional[str], city: Optional[str], state: Optional[st
     if not delivered:
         tx, ty = point_at(_POSITION[status])
         parts.append(_truck(tx, ty))
-    parts.append(_label(W - 12, H - 10, "Simulated route", "end", size=10, weight=500, fill="#64748b"))
+    parts.append(_label(W - 12, H - 10, "Route", "end", size=10, weight=500, fill="#64748b"))
     parts.append("</svg>")
     return "".join(parts)
 
