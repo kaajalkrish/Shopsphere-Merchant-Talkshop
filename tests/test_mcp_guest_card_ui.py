@@ -237,7 +237,7 @@ def _guest_pays_in_the_card(client, ui: CardDriver) -> str:
     shown = ui.texts()
     assert "Ship to: Pat Guest, Austin, TX 78701" in shown and "Confirmation email to: p***@guestmail.net" in shown
     assert "Delivery: Express" in shown and ui.state["shipping_text"] == "$9.99" and ui.state["payable"]
-    ui.click(f"Approve & pay in Claude {ui.state['total_text']}")
+    ui.click(f"Approve & pay with Claude {ui.state['total_text']}")
     assert ui.tool_calls[-1] == "start_guest_payment" and "/psp/hosted/" in ui.links[-1]
     assert "Finish on the secure payment page" in ui.texts()
     ui.click("I've finished paying")                                # too early: nothing happens
@@ -334,7 +334,7 @@ def test_a_stale_customer_token_never_turns_guest_checkout_into_a_sign_in(client
 
 
 def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_form(client):
-    """Cart card → Check out as guest → "Yes, use it" → a sandbox card → Approve & pay: no form,
+    """Cart card → Check out as guest → "Yes, pay with Claude" → a sandbox card → Approve & pay: no form,
     no card entry, no sign-in; the order is placed once and tracked in the card."""
     found, _ = card_of(client, "search_shopsphere", query="running shoes", size="10")
     call(client, "add_to_cart", product_id="SSP001", size="10", color="Black", visitor_cart=found["visitor_cart"])
@@ -346,7 +346,7 @@ def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_for
     assert "Jordan Lee" not in shown and "94105" not in shown        # nothing personal before the shopper agrees
     assert "g_name" not in ui.inputs()
     assert not [b for b in ui.buttons() if b.startswith("Approve & pay")]
-    ui.click("Yes, use it")
+    ui.click("Yes, pay with Claude")
     assert ui.tool_calls[-1] == "card_use_guest_profile" and ui.state["profile_used"]
     assert "Ship to: Jordan Lee, San Francisco, CA 94105" in ui.texts()
     assert {"Visa •••• 4242", "Mastercard •••• 4444"} <= set(ui.buttons())
@@ -354,7 +354,7 @@ def test_guest_card_uses_the_authorized_profile_and_a_sandbox_card_without_a_for
     ui.click("Visa •••• 4242")
     assert ui.tool_calls[-1] == "card_review_guest_order" and ui.state["review_ready"]
     assert "Pay with: Visa •••• 4242" in ui.texts() and "Delivery: Express" in ui.texts()
-    ui.click(f"Approve & pay in Claude {ui.state['total_text']}")
+    ui.click(f"Approve & pay with Claude {ui.state['total_text']}")
     assert ui.tool_calls[-1] == "card_place_guest_order" and ui.state["paid"] and ui.sign_in_requests == 0
     order_id = ui.state["order_ref"]
     shown = ui.texts()
@@ -442,7 +442,7 @@ def _choose_and_pay(ui: CardDriver) -> str:
     visa = [b for b in ui.buttons() if b.startswith("Pay with") and "Visa" in b and not b.startswith("✓")]
     if visa:
         ui.click(visa[0])
-    ui.click(f"Approve & pay in Claude {ui.state['c_total_text']}")
+    ui.click(f"Approve & pay with Claude {ui.state['c_total_text']}")
     assert ui.tool_calls[-1] != "approve_and_pay" and "Confirm with passkey" in ui.buttons()   # one more tap
     ui.click("Confirm with passkey")
     shown = ui.texts()

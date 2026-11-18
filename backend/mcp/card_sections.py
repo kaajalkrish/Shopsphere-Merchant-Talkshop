@@ -195,7 +195,7 @@ def _guest_profile_steps() -> None:
         Muted(f"{S.profile_text}")
         Muted("From your saved ShopSphere profile. Use it for this order?")
         with Row(gap=2, css_class="flex-wrap"):
-            Button("Yes, use it", on_click=CallTool(
+            Button("Yes, pay with Claude", on_click=CallTool(
                 "card_use_guest_profile", arguments={"guest_token": S.guest_token},
                 onSuccess=[*_set_from_result(GUEST_REFRESHED), *_set_from_result(("profile_used", "g_cards")),
                            SetState("g_email", RESULT.track_email)],
@@ -222,7 +222,7 @@ def _guest_profile_steps() -> None:
 def _guest_profile_pay() -> None:
     S = STATE
     with If(S.review_ready), If(~S.paid):
-        Button(f"Approve & pay in Claude {S.total_text}", on_click=CallTool(
+        Button(f"Approve & pay with Claude {S.total_text}", on_click=CallTool(
             "card_place_guest_order", arguments={"guest_token": S.guest_token, "authorization": S.authorization},
             onSuccess=[SetState("paid", True), SetState("order_ref", RESULT.order_id),
                        SetState("sent_to", RESULT.confirmation_sent_to), SetState("arrives", RESULT.arrives),
@@ -291,7 +291,7 @@ def guest_section() -> None:
                 Muted(f"{S.problem}")
             with If(S.payable), If(~S.paid), If(~S.has_profile | S.typing):
                 with If(~S.handing_off):
-                    Button(f"Approve & pay in Claude {S.total_text}", on_click=CallTool(
+                    Button(f"Approve & pay with Claude {S.total_text}", on_click=CallTool(
                         "start_guest_payment", arguments={
                             "guest_token": S.guest_token, "checkout_version": S.version, "final_amount": S.total,
                             "currency": S.pay_currency},
@@ -455,7 +455,7 @@ def checkout_section() -> None:
                          "currency": S.c_pay_currency}
                 with If(S.c_new_card):
                     with If(~S.c_handing_off):
-                        Button(f"Approve & pay in Claude {S.c_total_text}", on_click=CallTool(
+                        Button(f"Approve & pay with Claude {S.c_total_text}", on_click=CallTool(
                             "start_new_card_payment", arguments=scope,
                             onSuccess=[SetState("c_hosted_url", RESULT.hosted_url),
                                        SetState("c_session_id", RESULT.payment_session_id),
@@ -473,7 +473,7 @@ def checkout_section() -> None:
                             onError=failed_toast("Not finished yet")), save_hint=True)
                 with If(~S.c_new_card):
                     with If(~S.c_confirming):
-                        Button(f"Approve & pay in Claude {S.c_total_text}", on_click=SetState("c_confirming", True))
+                        Button(f"Approve & pay with Claude {S.c_total_text}", on_click=SetState("c_confirming", True))
                         Muted("Nothing is charged until you approve. Claude can't press this button.")
                     with If(S.c_confirming):
                         Text("Confirm it's you", css_class="font-medium")

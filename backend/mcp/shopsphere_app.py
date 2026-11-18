@@ -1345,7 +1345,7 @@ def _guest_screen(guest_token: str) -> dict:
 
 @cards.tool()
 def card_use_guest_profile(guest_token: str) -> dict:
-    """App-only: "Yes, use it" on the guest card (the shopper's own tap is the consent). Ships this order
+    """App-only: "Yes, pay with Claude" on the guest card (the shopper's own tap is the consent). Ships this order
     to the shopper's authorized profile (this order only) and returns the profile's cards to show."""
     out = _use_profile(guest_token, True)
     user, _ = _guest(guest_token)
